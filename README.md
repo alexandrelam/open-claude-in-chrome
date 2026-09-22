@@ -19,8 +19,7 @@
   <a href="#imitation-learning-recording">Imitation learning</a> ·
   <a href="#architecture">Architecture</a> ·
   <a href="https://youtu.be/n4-2fjOsGhw">Demo</a> ·
-  <a href="https://www.noemica.io/blog/reverse-engineered-claude-in-chrome">How I built it</a> ·
-  <a href="https://discord.gg/F4HBKAEbNg">Discord</a>
+  <a href="https://www.noemica.io/blog/reverse-engineered-claude-in-chrome">How I built it</a>
 </p>
 
 ---

@@ -938,6 +938,169 @@ await check("jev_decide proposes without acting", async () => {
   assert(!browser.calls.some((c) => c.name === "computer" || c.name === "form_input"), "nothing was executed");
 });
 
+// --- staying with Jev: demotion, recovery, skipping ---------------------------
+
+await check("TYPE_AND_SUBMIT on a combobox is demoted to TYPE_TEXT, not handed back", async () => {
+  // The audited 8-leg chain died on its last leg exactly here: typing into a
+  // tag filter was right, the blind Enter was not.
+  const map = new Map([["e1", row({ ref: "ref_4", role: "combobox", name: "Tag filter:" })]]);
+  const answers = {
+    operation: { type: "choice", choice: "TYPE_AND_SUBMIT", confidence: 0.5, probabilities: { TYPE_AND_SUBMIT: 0.5, TYPE_TEXT: 0.4, CLICK: 0.1 } },
+    text_target: choice("e1", 0.95), value_key: choice("tag", 1), sensitive: noul(0), satisfied: notYet
+  };
+  const v = validate(answers, map, CFG, { allowSensitive: false, values: { tag: "mobile edit" } });
+  assert(v.ok, `should pass: ${v.reason}`);
+  eq(v.operation, "TYPE_TEXT", "demoted operation");
+  eq(v.demotedFrom, "TYPE_AND_SUBMIT", "records what Jev asked for");
+  assert(Math.abs(v.confidence - 0.9) < 1e-9, `mass of both operations counts: ${v.confidence}`);
+});
+
+await check("an operation with no lesser form is still refused", async () => {
+  const map = new Map([["e1", row({ role: "link", name: "Docs", href: "https://x.test" })]]);
+  const v = validate({ operation: choice("PRESS_ENTER", 0.95), text_target: choice("e1", 0.95), sensitive: noul(0) }, map, CFG, { allowSensitive: false, values: {} });
+  eq(v.status, "needs_help", "status");
+});
+
+await check("a failed action is re-decided on a fresh look, and the run carries on", async () => {
+  const browser = fakeBrowser({
+    rows: [row({ ref: "ref_1", role: "button", name: "Apply" }), row({ ref: "ref_2", role: "button", name: "Apply filters" })],
+    onClick: (s) => { s.url = "https://app.test/applied"; }
+  });
+  const inner = browser.callTool;
+  const callTool = async (name, args) =>
+    name === "jev_act" && args.ref === "ref_1"
+      ? { content: [{ type: "text", text: "Error: element is disabled" }] }
+      : inner(name, args);
+  const client = fakeClient([
+    { operation: choice("CLICK", 0.95), click_target: choice("e1", 0.95), sensitive: noul(0), satisfied: notYet },
+    { operation: choice("CLICK", 0.95), click_target: choice("e2", 0.95), sensitive: noul(0), satisfied: notYet },
+    { operation: choice("DONE", 0.95), sensitive: noul(0), satisfied: noul(0.95) }
+  ]);
+  const out = await navigate(callTool, client, CFG, { tabId: 1, goal: "apply", success_criteria: "applied" });
+  eq(out.status, "done", `reason: ${out.reason}`);
+  eq(out.steps.length, 1, "only the action that worked is a step");
+  eq(out.subgoals[0].recovered.length, 1, "the recovery is reported");
+});
+
+await check("the same failed action chosen again hands back instead of retrying", async () => {
+  const browser = fakeBrowser({ rows: [row({ ref: "ref_1", role: "button", name: "Apply" })] });
+  let acts = 0;
+  const inner = browser.callTool;
+  const callTool = async (name, args) => {
+    if (name === "jev_act") { acts++; return { content: [{ type: "text", text: "Error: element is disabled" }] }; }
+    return inner(name, args);
+  };
+  const client = fakeClient([{ operation: choice("CLICK", 0.95), click_target: choice("e1", 0.95), sensitive: noul(0), satisfied: notYet }]);
+  const out = await navigate(callTool, client, CFG, { tabId: 1, goal: "apply", success_criteria: "applied" });
+  eq(out.status, "needs_help", "status");
+  assert(out.reason.includes("disabled"), `names the original error: ${out.reason}`);
+  eq(acts, 1, "tried once");
+});
+
+await check("recoveries are bounded per subgoal", async () => {
+  // Every button fails; a fresh decision picks a new one each time.
+  const rows = Array.from({ length: 6 }, (_, k) => row({ ref: `ref_${k + 1}`, role: "button", name: `B${k + 1}` }));
+  const browser = fakeBrowser({ rows });
+  let acts = 0;
+  const inner = browser.callTool;
+  const callTool = async (name, args) => {
+    if (name === "jev_act") { acts++; return { content: [{ type: "text", text: "Error: element is disabled" }] }; }
+    return inner(name, args);
+  };
+  let k = 0;
+  const client = fakeClient([() => ({ operation: choice("CLICK", 0.95), click_target: choice(`e${++k}`, 0.95), sensitive: noul(0), satisfied: notYet })]);
+  const out = await navigate(callTool, client, CFG, { tabId: 1, goal: "g", success_criteria: "s" });
+  eq(out.status, "needs_help", "status");
+  eq(acts, 3, "the first failure plus two recoveries");
+});
+
+await check("a slow page gets one long wait before it counts as no progress", async () => {
+  // An SPA that updates after a fetch looks dead inside the normal window.
+  let n = 0;
+  const browser = fakeBrowser({ rows: [row({ ref: "ref_1", role: "button", name: "Load more" })] });
+  const inner = browser.callTool;
+  const callTool = async (name, args) => {
+    if (name === "jev_settle" && args.timeoutMs === 1500) browser.state.title = `Loaded ${++n}`;
+    return inner(name, args);
+  };
+  const client = fakeClient([
+    { operation: choice("SCROLL_DOWN", 0.9), sensitive: noul(0), satisfied: notYet },
+    { operation: choice("SCROLL_UP", 0.9), sensitive: noul(0), satisfied: notYet },
+    { operation: choice("SCROLL_DOWN", 0.9), sensitive: noul(0), satisfied: notYet },
+    { operation: choice("WAIT", 0.9), sensitive: noul(0), satisfied: noul(0.95) }
+  ]);
+  const out = await navigate(callTool, client, CFG, { tabId: 1, goal: "g", success_criteria: "s" });
+  eq(out.status, "done", `reason: ${out.reason}`);
+  eq(out.subgoals[0].recovered.length, 1, "the long wait is reported");
+});
+
+await check("an optional leg that fails is skipped and the next leg runs", async () => {
+  const browser = fakeBrowser({ rows: [row({ ref: "ref_1", role: "button", name: "Delete everything" }), row({ ref: "ref_2", role: "link", name: "Next", href: "https://app.test/next" })] });
+  const client = fakeClient([
+    { operation: choice("CLICK", 0.99), click_target: choice("e1", 0.99), sensitive: noul(0.99), satisfied: notYet },
+    { operation: choice("DONE", 0.9), sensitive: noul(0), satisfied: noul(0.95) }
+  ]);
+  const out = await navigate(browser.callTool, client, CFG, {
+    tabId: 1,
+    subgoals: [
+      { goal: "dismiss the banner", success_criteria: "no banner", optional: true },
+      { goal: "carry on", success_criteria: "b" }
+    ]
+  });
+  eq(out.status, "partial", `reason: ${out.reason}`);
+  eq(out.subgoals.length, 2, "both legs ran");
+  eq(out.subgoals[0].skipped, true, "the first is marked skipped");
+  eq(out.subgoals[1].status, "done", "the second finished");
+  assert(out.reason.includes("1 of 2") && out.reason.includes("dismiss the banner"), `reason lists what is owed: ${out.reason}`);
+});
+
+await check("continue_on_failure makes every leg skippable, and final_check is not run on a partial", async () => {
+  const browser = fakeBrowser({ rows: [row({ ref: "ref_1", role: "button", name: "Go" })] });
+  const client = fakeClient([
+    { operation: choice("BLOCKED", 0.9), sensitive: noul(0), satisfied: notYet },
+    { operation: choice("DONE", 0.9), sensitive: noul(0), satisfied: noul(0.95) }
+  ]);
+  const out = await navigate(browser.callTool, client, CFG, {
+    tabId: 1, continue_on_failure: true, final_check: "everything",
+    subgoals: [{ goal: "a", success_criteria: "x" }, { goal: "b", success_criteria: "y" }]
+  });
+  eq(out.status, "partial", `reason: ${out.reason}`);
+  eq(client.seen.length, 2, "no final check request");
+});
+
+await check("a leg marked optional: false still stops a continue_on_failure run", async () => {
+  const browser = fakeBrowser({ rows: [row({ ref: "ref_1", role: "button", name: "Go" })] });
+  const client = fakeClient([{ operation: choice("BLOCKED", 0.9), sensitive: noul(0), satisfied: notYet }]);
+  const out = await navigate(browser.callTool, client, CFG, {
+    tabId: 1, continue_on_failure: true,
+    subgoals: [{ goal: "a", success_criteria: "x", optional: false }, { goal: "b", success_criteria: "y" }]
+  });
+  eq(out.status, "blocked", "status");
+  eq(out.subgoals.length, 1, "later legs never ran");
+});
+
+await check("running out of time is never skipped", async () => {
+  const browser = fakeBrowser({ rows: [row({ ref: "ref_1", role: "button", name: "Go" })] });
+  const client = fakeClient([{ operation: choice("DONE", 0.9), sensitive: noul(0), satisfied: noul(0.95) }]);
+  const out = await navigate(browser.callTool, client, CFG, {
+    tabId: 1, continue_on_failure: true, max_ms: -1,
+    subgoals: [{ goal: "a", success_criteria: "x" }, { goal: "b", success_criteria: "y" }]
+  });
+  eq(out.status, "limit_reached", "status");
+  eq(out.subgoals.length, 1, "stopped at the first leg");
+});
+
+await check("when every leg is skipped the run reports the first failure, not partial", async () => {
+  const browser = fakeBrowser({ rows: [row({ ref: "ref_1", role: "button", name: "Go" })] });
+  const client = fakeClient([{ operation: choice("BLOCKED", 0.9), sensitive: noul(0), satisfied: notYet }]);
+  const out = await navigate(browser.callTool, client, CFG, {
+    tabId: 1, continue_on_failure: true,
+    subgoals: [{ goal: "a", success_criteria: "x" }, { goal: "b", success_criteria: "y" }]
+  });
+  eq(out.status, "blocked", "status");
+  assert(out.reason.startsWith("No subgoal finished"), `reason: ${out.reason}`);
+});
+
 try {
   fs.rmSync(CFG.tracesDir, { recursive: true, force: true });
 } catch {}

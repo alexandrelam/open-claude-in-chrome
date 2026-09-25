@@ -9,7 +9,7 @@ export const JEV_TOOLS = [
   {
     name: "jev_navigate",
     description:
-      "Delegate a bounded browser subgoal to the Jev decision model, which picks each next action while the extension carries it out in the real profile. Use this instead of a run of read_page/computer calls when the steps are mechanical (click through to a page, filter a list, fill a form whose values you supply). You keep planning: give one subgoal, an observable success condition, and any text to type. Returns the status, the steps taken, and an excerpt of the final page so you can continue without calling read_page. A status of needs_help, needs_value or blocked means it stopped deliberately and is handing control back to you — read `reason` and take the next step yourself with the ordinary tools.",
+      "Delegate a bounded browser subgoal to the Jev decision model, which picks each next action while the extension carries it out in the real profile. Use this instead of a run of read_page/computer calls when the steps are mechanical (click through to a page, filter a list, fill a form whose values you supply). You keep planning: give one subgoal, an observable success condition, and any text to type. Returns the status, the steps taken, and an excerpt of the final page so you can continue without calling read_page. A status of needs_help, needs_value or blocked means it stopped deliberately and is handing control back to you — read `reason`, take that one step yourself with the ordinary tools, then call again with only the subgoals that remain rather than re-planning. A status of partial means every leg ran but some were skipped; `reason` lists them.",
     paramShape: {
       goal: z
         .string()
@@ -22,12 +22,22 @@ export const JEV_TOOLS = [
           z.object({
             goal: z.string().describe("This leg's objective."),
             success_criteria: z.string().describe("Observable condition that means this leg is finished."),
-            values: z.record(z.string()).optional().describe("Text for this leg's fields, as {label: value}.")
+            values: z.record(z.string()).optional().describe("Text for this leg's fields, as {label: value}."),
+            optional: z
+              .boolean()
+              .optional()
+              .describe("If this leg fails, skip it and run the next one from wherever the page was left. Use for legs nothing later depends on, like dismissing a banner. Overrides continue_on_failure for this leg.")
           })
         )
         .optional()
         .describe(
-          "Several subgoals run in sequence in ONE call — prefer this for any multi-part task, since it collapses what would be several of your turns into one. Each leg starts from the page the previous one left. The run stops at the first leg that does not finish, and `reason` names which, so you can take that step yourself and call again with the rest."
+          "Several subgoals run in sequence in ONE call — prefer this for any multi-part task, and put as much of the plan in it as you can write without seeing the pages, since it collapses what would be several of your turns into one. Each leg starts from the page the previous one left. The run stops at the first leg that does not finish (unless it is optional), and `reason` names which, so you can take that step yourself and call again with the rest."
+        ),
+      continue_on_failure: z
+        .boolean()
+        .optional()
+        .describe(
+          "Treat every leg as optional: a leg that fails is skipped and the run continues, returning status partial with the skipped legs listed. Only for independent legs — a later leg that needs an earlier one's page will then start from the wrong place. Running out of time or budget still stops the run. Default false."
         ),
       tabId: z
         .number()
@@ -55,7 +65,7 @@ export const JEV_TOOLS = [
           "One sentence describing the WHOLE intended end state, checked once after every subgoal has finished. Worth setting whenever later steps can undo earlier ones — some forms reset a section's style when a toggle changes, and a per-step check cannot see that because it only ever asks whether the current step is done. Costs one extra request."
         ),
       max_steps: z.number().optional().describe("Maximum browser actions per subgoal (default 20, hard cap 50)."),
-      max_ms: z.number().optional().describe("Wall-clock budget in milliseconds for the whole call, across every subgoal (default 60000)."),
+      max_ms: z.number().optional().describe("Wall-clock budget in milliseconds for the whole call, across every subgoal (default 60000). Raise it for a long chain of subgoals — the default is sized for a few."),
       min_confidence: z
         .number()
         .optional()

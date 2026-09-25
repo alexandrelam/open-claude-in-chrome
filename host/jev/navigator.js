@@ -22,6 +22,7 @@ import {
   rowLabel,
   SUBMITTING_OPERATIONS,
   TARGET_HEADS,
+  DEMOTIONS,
   targetHead,
   namesAgree
 } from "./actions.js";
@@ -31,6 +32,11 @@ import { createTrace } from "./trace.js";
 import { BudgetExceeded } from "./client.js";
 
 const NONE = "NONE";
+
+// How many times one subgoal may recover from a failure on its own before it
+// hands back. Each recovery is a fresh look at the page and a fresh decision,
+// so this bounds the extra Jev requests a flaky page can cost.
+const MAX_RECOVERIES = 2;
 
 /**
  * Will activating this href replace the document?
@@ -232,8 +238,9 @@ export function validate(answers, idMap, cfg, { allowSensitive, values }) {
   if (!opAns?.choice || !OPERATIONS[opAns.choice]) {
     return { ok: false, status: "needs_help", reason: `Jev returned an unknown operation: ${opAns?.choice}` };
   }
-  const operation = opAns.choice;
-  const spec = OPERATIONS[operation];
+  let operation = opAns.choice;
+  let spec = OPERATIONS[operation];
+  let demotedFrom = null;
 
   if (operation === "BLOCKED") {
     return { ok: false, status: "blocked", operation, reason: "Jev reports no offered operation can advance the goal from this page." };
@@ -251,7 +258,17 @@ export function validate(answers, idMap, cfg, { allowSensitive, values }) {
     // Still checked: a head is shared by operations with different rules
     // (TYPE_AND_SUBMIT refuses a combobox that TYPE_TEXT accepts).
     if (!isCompatible(operation, row)) {
-      return { ok: false, status: "needs_help", operation, reason: `Operation ${operation} is not valid on ${rowLabel(row)}.` };
+      const lesser = DEMOTIONS[operation];
+      if (!lesser || !isCompatible(lesser, row)) {
+        return { ok: false, status: "needs_help", operation, reason: `Operation ${operation} is not valid on ${rowLabel(row)}.` };
+      }
+      // Both operations say "act on this field through this head"; they differ
+      // only in the part the element refuses. So the mass Jev split between
+      // them is all confidence in the part that survives.
+      confidence = (opAns.probabilities?.[operation] ?? opAns.confidence) + (opAns.probabilities?.[lesser] ?? 0);
+      demotedFrom = operation;
+      operation = lesser;
+      spec = OPERATIONS[operation];
     }
     // Every option in the head is legal for its operation, so the chosen
     // option's probability already is the confidence in the target given the
@@ -291,7 +308,7 @@ export function validate(answers, idMap, cfg, { allowSensitive, values }) {
     value = String(values[key]);
   }
 
-  return { ok: true, operation, row, value, confidence, sensitive: sensitiveByModel || sensitiveByLabel };
+  return { ok: true, operation, row, value, confidence, sensitive: sensitiveByModel || sensitiveByLabel, demotedFrom };
 }
 
 async function observeOrFail(callTool, tabId, cfg) {
@@ -375,7 +392,8 @@ export function normalizeSubgoals(args) {
     return args.subgoals.map((sg) => ({
       goal: sg.goal,
       successCriteria: sg.success_criteria ?? sg.successCriteria,
-      values: sg.values ?? args.values ?? {}
+      values: sg.values ?? args.values ?? {},
+      optional: sg.optional ?? null
     }));
   }
   return [
@@ -404,6 +422,21 @@ async function runSubgoal(callTool, client, cfg, sub, opts, ctx) {
   let unchangedStreak = 0;
   const actionCounts = new Map();
 
+  // Failures the loop gets past on its own, instead of handing each one to
+  // Claude. Most hand-backs in real runs were not doubt, they were a page
+  // mid-flight: an action that failed on a re-render, or a page that took
+  // longer to update than the settle window. A fresh look and a fresh decision
+  // clears those. `failedActions` keeps it honest: an action that already
+  // failed from this page is never tried a second time.
+  const recovered = [];
+  const failedActions = new Map();
+  const canRecover = (why) => {
+    if (recovered.length >= MAX_RECOVERIES) return false;
+    recovered.push(why);
+    return true;
+  };
+  const stop = (status, reason, extra = {}) => ({ status, reason, steps, recovered, ...extra });
+
   // Observing is read-only and idempotent, so a failure is worth retrying.
   //
   // The post-action observation routinely lands while the page is still
@@ -426,7 +459,7 @@ async function runSubgoal(callTool, client, cfg, sub, opts, ctx) {
 
   for (let n = 1; n <= maxSteps; n++) {
     if (Date.now() > ctx.deadline) {
-      return { status: "limit_reached", reason: `Time limit reached after ${steps.length} steps of this subgoal.`, steps };
+      return stop("limit_reached", `Time limit reached after ${steps.length} steps of this subgoal.`, { fatal: true });
     }
     const stepStart = Date.now();
     // Two counters on purpose: `decisionNo` numbers every Jev decision for the
@@ -444,7 +477,7 @@ async function runSubgoal(callTool, client, cfg, sub, opts, ctx) {
       const { obs: fresh, failure } = await observeNow();
       if (failure) {
         if (fresh) ctx.obs = fresh;
-        return { status: failure.status, reason: failure.reason, steps };
+        return stop(failure.status, failure.reason, { fatal: true });
       }
       obs = fresh;
     }
@@ -479,8 +512,8 @@ async function runSubgoal(callTool, client, cfg, sub, opts, ctx) {
         inputTokens = tokensOf(res.usage);
         ctx.jevMs += jevMs;
       } catch (err) {
-        if (err instanceof BudgetExceeded) return { status: "limit_reached", reason: err.message, steps };
-        return { status: "needs_help", reason: `Jev request failed: ${err?.message ?? err}`, steps };
+        if (err instanceof BudgetExceeded) return stop("limit_reached", err.message, { fatal: true });
+        return stop("needs_help", `Jev request failed: ${err?.message ?? err}`);
       }
       verdict = validate(answers, request.idMap, cfg, { allowSensitive, values });
     }
@@ -500,10 +533,10 @@ async function runSubgoal(callTool, client, cfg, sub, opts, ctx) {
     // action and before any gate: if the page already satisfies the criteria,
     // there is nothing left to do and nothing to refuse.
     if (satisfied > 0.5) {
-      return { status: "done", reason: null, steps, satisfied, carry: ask && !carried ? carryFor(answers, request, short, obs, ask, cfg, allowSensitive) : null };
+      return stop("done", null, { satisfied, carry: ask && !carried ? carryFor(answers, request, short, obs, ask, cfg, allowSensitive) : null });
     }
 
-    if (!verdict.ok) return { status: verdict.status, reason: verdict.reason, steps };
+    if (!verdict.ok) return stop(verdict.status, verdict.reason);
 
     if (verdict.operation === "DONE") {
       // Jev says finished, the page says otherwise — exactly the disagreement
@@ -512,7 +545,7 @@ async function runSubgoal(callTool, client, cfg, sub, opts, ctx) {
       unchangedStreak++;
       ctx.obs = null;
       if (unchangedStreak >= 2) {
-        return { status: "needs_help", reason: `Jev reported DONE but the success criteria are not met (p=${satisfied.toFixed(2)}).`, steps };
+        return stop("needs_help", `Jev reported DONE but the success criteria are not met (p=${satisfied.toFixed(2)}).`);
       }
       continue;
     }
@@ -531,7 +564,10 @@ async function runSubgoal(callTool, client, cfg, sub, opts, ctx) {
     const count = (actionCounts.get(actionKey) ?? 0) + 1;
     actionCounts.set(actionKey, count);
     if (count > 2) {
-      return { status: "needs_help", reason: `The same action (${verdict.operation} on ${rowLabel(verdict.row)}) came up three times without progress.`, steps };
+      return stop("needs_help", `The same action (${verdict.operation} on ${rowLabel(verdict.row)}) came up three times without progress.`);
+    }
+    if (failedActions.has(actionKey)) {
+      return stop("needs_help", `The action failed, and was chosen again after a fresh look at the page: ${failedActions.get(actionKey)}`);
     }
 
     // Act. A ref can go stale between the observation and here — the Jev call
@@ -551,11 +587,23 @@ async function runSubgoal(callTool, client, cfg, sub, opts, ctx) {
       }
     }
     ctx.browserMs += Date.now() - actStart;
-    if (acted.error) return { status: "needs_help", reason: `The action failed: ${acted.error}`, steps };
+    if (acted.error) {
+      // Look again and decide again. The page usually re-rendered or moved
+      // under the action, and the new decision is made on what is there now.
+      // Choosing the same action from the same page is caught above.
+      failedActions.set(actionKey, acted.error);
+      if (!canRecover(`${verdict.operation} on ${rowLabel(verdict.row)} failed: ${acted.error}`)) {
+        return stop("needs_help", `The action failed: ${acted.error}`);
+      }
+      await settle(callTool, tabId, ctx, { expect: "wait", timeoutMs: 300 }, 300);
+      ctx.obs = null;
+      continue;
+    }
 
     steps.push({
       i: ++ctx.actionNo, operation: verdict.operation, target_ref: verdict.row?.ref ?? null,
       target_label: rowLabel(verdict.row), confidence: Number(verdict.confidence.toFixed(3)),
+      ...(verdict.demotedFrom ? { demoted_from: verdict.demotedFrom } : {}),
       ms: Date.now() - stepStart
     });
 
@@ -617,14 +665,28 @@ async function runSubgoal(callTool, client, cfg, sub, opts, ctx) {
     }
     if (afterFail) {
       if (after) ctx.obs = after;
-      return { status: afterFail.status, reason: afterFail.reason, steps };
+      return stop(afterFail.status, afterFail.reason, { fatal: true });
     }
-    const sig = observationSignature(after);
+    let sig = observationSignature(after);
     if (lastSignature !== null && sig === lastSignature) {
       unchangedStreak++;
+      // A slow page — an SPA waiting on a fetch — looks exactly like a dead
+      // one inside the normal settle window. Give it one long wait before
+      // calling it no progress.
+      if (unchangedStreak >= 2 && canRecover(`the page looked unchanged after ${verdict.operation} on ${rowLabel(verdict.row)}; waited longer`)) {
+        await settle(callTool, tabId, ctx, { expect: "wait", timeoutMs: 1500 }, 1500);
+        const { obs: later, failure: laterFail } = await observeNow();
+        if (laterFail) {
+          if (later) ctx.obs = later;
+          return stop(laterFail.status, laterFail.reason, { fatal: true });
+        }
+        after = later;
+        sig = observationSignature(after);
+        if (sig !== lastSignature) unchangedStreak = 0;
+      }
       if (unchangedStreak >= 2) {
         ctx.obs = after;
-        return { status: "needs_help", reason: `Two steps in a row left the page unchanged after ${verdict.operation} on ${rowLabel(verdict.row)}.`, steps };
+        return stop("needs_help", `Two steps in a row left the page unchanged after ${verdict.operation} on ${rowLabel(verdict.row)}.`);
       }
     } else {
       unchangedStreak = 0;
@@ -633,7 +695,7 @@ async function runSubgoal(callTool, client, cfg, sub, opts, ctx) {
     ctx.obs = after;
   }
 
-  return { status: "limit_reached", reason: `Step limit of ${maxSteps} reached for this subgoal.`, steps };
+  return stop("limit_reached", `Step limit of ${maxSteps} reached for this subgoal.`);
 }
 
 /**
@@ -735,8 +797,11 @@ export async function navigate(callTool, client, cfg, args) {
   }
 
   const finalCheck = args.final_check ?? args.finalCheck ?? null;
+  const continueOnFailure = Boolean(args.continue_on_failure ?? args.continueOnFailure);
 
   let carry = null;
+  const skipped = [];
+  let stopped = false;
   for (const [idx, sub] of subgoals.entries()) {
     const leg = await runSubgoal(
       callTool, client, runCfg, sub,
@@ -744,18 +809,49 @@ export async function navigate(callTool, client, cfg, args) {
       ctx
     );
     carry = leg.carry ?? null;
-    legs.push({ i: idx + 1, goal: sub.goal, status: leg.status, steps: leg.steps, reason: leg.reason });
+    // A leg that fails but may be skipped is recorded and passed over; the next
+    // leg starts from wherever this one left the page. Running out of time or
+    // budget, or losing the page, stops every leg alike, so those never skip.
+    const skip = leg.status !== "done" && !leg.fatal && (sub.optional ?? continueOnFailure);
+    legs.push({
+      i: idx + 1, goal: sub.goal, status: leg.status, steps: leg.steps, reason: leg.reason,
+      ...(leg.recovered?.length ? { recovered: leg.recovered } : {}),
+      ...(skip ? { skipped: true } : {})
+    });
     allSteps.push(...leg.steps);
     status = leg.status;
     reason = leg.reason;
+    if (skip) {
+      skipped.push({ i: idx + 1, goal: sub.goal, status: leg.status, reason: leg.reason });
+      continue;
+    }
     // Stop at the first leg that does not finish, and say which one it was so
     // Claude knows where to pick the task back up.
     if (leg.status !== "done") {
       if (subgoals.length > 1) {
         reason = `Subgoal ${idx + 1} of ${subgoals.length} ("${sub.goal}") stopped: ${leg.reason}`;
       }
+      stopped = true;
       break;
     }
+  }
+
+  // Every leg ran, but some were skipped. `partial` says the run went the whole
+  // way; the reason lists exactly which legs Claude still owes.
+  if (!stopped && skipped.length) {
+    const list = skipped.map((s) => `${s.i} ("${s.goal}"): ${s.status} — ${s.reason}`).join("; ");
+    if (skipped.length === subgoals.length) {
+      status = skipped[0].status;
+      reason = `No subgoal finished. Skipped ${list}`;
+    } else {
+      status = "partial";
+      reason = `${subgoals.length - skipped.length} of ${subgoals.length} subgoals finished. Skipped ${list}`;
+    }
+  } else if (!stopped) {
+    status = "done";
+    reason = null;
+  } else if (skipped.length) {
+    reason += ` Earlier legs skipped: ${skipped.map((s) => `${s.i} ("${s.goal}")`).join(", ")}.`;
   }
 
   // Every leg reported done — but a per-leg check only ever asked "is THIS leg

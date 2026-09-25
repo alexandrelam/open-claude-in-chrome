@@ -485,9 +485,24 @@ and a status:
 | `needs_value` | A field needs text you did not provide. `reason` names the field and its role |
 | `blocked` | Nothing on the page can advance the goal, or the domain is not permitted |
 | `limit_reached` | Hit `max_steps`, `max_ms` or the spend cap |
+| `partial` | Every leg ran, but some were skipped (see `optional` below). `reason` lists which |
 
 Anything other than `done` hands control back: read `reason`, take that one step
-yourself with the ordinary tools, and delegate again.
+yourself with the ordinary tools, and delegate again with only the steps that remain.
+
+Before handing back, the loop gets past two kinds of failure on its own, up to
+twice per subgoal, and lists each one under `recovered` in that subgoal's result:
+
+- **An action that fails** (the element is disabled, or the page re-rendered
+  under it). The loop takes a fresh look and asks Jev again. If Jev picks the
+  same action from the same page, the run hands back instead of retrying it.
+- **A page that looks unchanged** after two steps. The loop waits once more,
+  for up to 1.5s, before calling it no progress, because a page still waiting
+  on a fetch looks the same as a stuck one.
+
+If Jev picks `TYPE_AND_SUBMIT` for an autocomplete combobox, which can't be
+blindly submitted, the loop types without submitting (`TYPE_TEXT`), and the next
+decision picks from the list that opens. The step records `demoted_from`.
 
 For a multi-part task, pass several subgoals and it runs them in sequence in one
 call — each leg starts from the page the last one left, and the run stops at the
@@ -500,6 +515,23 @@ jev_navigate({
   subgoals: [
     { goal: "search for the customer", success_criteria: "search results for ACME Corp are listed" },
     { goal: "open their most recent invoice", success_criteria: "an invoice detail page with a total is shown" }
+  ]
+})
+```
+
+Mark a leg `optional: true` to skip it if it fails and carry on from wherever
+the page was left, or pass `continue_on_failure: true` to treat every leg that
+way. This is only for legs that later ones don't depend on. Running out of
+time or budget still stops the run. For a long chain, raise `max_ms`: the 60s
+default covers the whole call, not each leg.
+
+```
+jev_navigate({
+  tabId: 12345,
+  max_ms: 300000,
+  subgoals: [
+    { goal: "dismiss the cookie banner", success_criteria: "no cookie banner is shown", optional: true },
+    { goal: "open the billing page", success_criteria: "the billing page is open" }
   ]
 })
 ```

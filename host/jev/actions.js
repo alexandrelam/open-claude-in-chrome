@@ -70,6 +70,18 @@ export const OPERATIONS = {
   }
 };
 
+// What an operation falls back to when the element refuses it.
+//
+// Only ever a step DOWN — the fallback does strictly less than the original,
+// never something it did not ask for. TYPE_AND_SUBMIT into an autocomplete
+// combobox is the case this is for: the typing was right, the blind Enter was
+// not, and handing that back to Claude ended an 8-leg Wikipedia chain on its
+// last leg. Typing and letting the next decision pick from the list that opens
+// is what a person would do.
+export const DEMOTIONS = {
+  TYPE_AND_SUBMIT: "TYPE_TEXT"
+};
+
 // Operations whose whole point is to submit, and therefore to navigate.
 //
 // These need their settle window judged on the URL rather than on the page

@@ -53,13 +53,46 @@ await check("CLICK accepts clickable roles and hrefs, rejects text fields", asyn
   assert(isCompatible("CLICK", row({ role: "link" })), "link");
   // An anchor often renders with no role at all; the href is the evidence.
   assert(isCompatible("CLICK", row({ role: "", href: "https://x.test" })), "roleless anchor");
-  assert(!isCompatible("CLICK", row({ role: "textbox" })), "textbox is not clickable");
+  // Text fields are covered by their own case below; a link is the real
+  // negative here.
+  assert(!isCompatible("TYPE_TEXT", row({ role: "link", href: "https://x.test" })), "a link is not typeable");
 });
 
 await check("TYPE_TEXT accepts editable fields only", async () => {
   assert(isCompatible("TYPE_TEXT", row({ role: "textbox" })), "textbox");
   assert(isCompatible("TYPE_TEXT", row({ role: "searchbox" })), "searchbox");
   assert(!isCompatible("TYPE_TEXT", row({ role: "link" })), "link is not editable");
+});
+
+await check("PRESS_ENTER exists, so a typed query can actually be submitted", async () => {
+  // Regression for the first real multi-step run: the loop typed a search query
+  // and then had no legal move to submit it. Many pages only accept Enter.
+  assert(isCompatible("PRESS_ENTER", row({ role: "searchbox" })), "searchbox");
+  assert(isCompatible("PRESS_ENTER", row({ type: "text" })), "plain input");
+  assert(!isCompatible("PRESS_ENTER", row({ role: "link", href: "https://x.test" })), "not a link");
+  assert(availableOperations([row({ role: "searchbox" })]).includes("PRESS_ENTER"), "offered when a field exists");
+  assert(!availableOperations([row({ role: "link", href: "https://x.test" })]).includes("PRESS_ENTER"), "not offered otherwise");
+});
+
+await check("PRESS_ENTER focuses the field before the keystroke", async () => {
+  // The key action dispatches to whatever has focus and ignores ref, and
+  // form_input never focuses anything, so without the click the Enter lands
+  // nowhere.
+  const calls = planToolCalls("PRESS_ENTER", row({ ref: "ref_4", role: "searchbox" }), undefined, 9);
+  eq(calls.length, 2, "two calls");
+  eq(calls[0][1].action, "left_click", "focus first");
+  eq(calls[0][1].ref, "ref_4", "on the field");
+  eq(calls[1][1].action, "key", "then the key");
+  eq(calls[1][1].text, "Return", "Enter");
+});
+
+await check("a text field can be clicked, not only typed into", async () => {
+  // Treating CLICK and TYPE_TEXT as mutually exclusive was too strict: focusing
+  // a field or opening its suggestions list is ordinary behaviour, and refusing
+  // it stranded a real run at needs_help.
+  assert(isCompatible("CLICK", row({ role: "searchbox" })), "searchbox is clickable");
+  assert(isCompatible("CLICK", row({ role: "textbox" })), "textbox is clickable");
+  assert(isCompatible("CLICK", row({ type: "text" })), "plain input is clickable");
 });
 
 await check("targetless operations need no row", async () => {

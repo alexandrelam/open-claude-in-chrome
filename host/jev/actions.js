@@ -32,6 +32,14 @@ export const OPERATIONS = {
     needsValue: true,
     description: "Pick an option in a dropdown or list"
   },
+  // Without this there is no way to submit. Typing into a search box leaves the
+  // text sitting there, and while many pages also offer a Search button, plenty
+  // only accept Enter. Found on the first real multi-step run: the loop typed a
+  // query and then had no legal move left.
+  PRESS_ENTER: {
+    needsTarget: true,
+    description: "Submit the text already entered in a field by pressing Enter"
+  },
   SCROLL_DOWN: { needsTarget: false, description: "Reveal more of the page below" },
   SCROLL_UP: { needsTarget: false, description: "Go back up the page" },
   WAIT: { needsTarget: false, description: "Let the page finish loading or settling" },
@@ -52,7 +60,15 @@ export function isCompatible(operation, row) {
     case "CLICK":
       // An anchor often renders with no role at all; its href is what makes it
       // clickable, so treat that as the evidence rather than demanding a role.
-      return CLICK_ROLES.has(role) || Boolean(row.href);
+      //
+      // Text fields are clickable too. Treating CLICK and TYPE_TEXT as mutually
+      // exclusive was too strict: focusing a field, or clicking it to open a
+      // suggestions dropdown, is something people do constantly, and refusing
+      // it stranded a run that had typed a query and wanted to open the
+      // autocomplete list.
+      return CLICK_ROLES.has(role) || TEXT_ROLES.has(role) || Boolean(row.href) || Boolean(row.type);
+    case "PRESS_ENTER":
+      return TEXT_ROLES.has(role) || Boolean(row.type);
     case "TYPE_TEXT":
       return TEXT_ROLES.has(role) || Boolean(row.type);
     case "SELECT":
@@ -67,7 +83,10 @@ export function availableOperations(rows) {
   const ops = new Set(["SCROLL_DOWN", "SCROLL_UP", "WAIT", "DONE", "BLOCKED"]);
   for (const r of rows) {
     if (isCompatible("CLICK", r)) ops.add("CLICK");
-    if (isCompatible("TYPE_TEXT", r)) ops.add("TYPE_TEXT");
+    if (isCompatible("TYPE_TEXT", r)) {
+      ops.add("TYPE_TEXT");
+      ops.add("PRESS_ENTER");
+    }
     if (isCompatible("SELECT", r)) ops.add("SELECT");
   }
   return [...ops];
@@ -99,6 +118,15 @@ export function planToolCalls(operation, row, value, tabId) {
       return [["computer", { action: "left_click", ref: row.ref, tabId }]];
     case "SELECT":
       return [["form_input", { ref: row.ref, value, tabId }]];
+    case "PRESS_ENTER":
+      // The key action dispatches to whatever currently has focus and ignores
+      // ref entirely (extension/background.js L1592), and form_input sets a
+      // value programmatically without focusing anything. So the click is not
+      // decoration — it is what makes the keystroke land in the right field.
+      return [
+        ["computer", { action: "left_click", ref: row.ref, tabId }],
+        ["computer", { action: "key", text: "Return", tabId }]
+      ];
     case "TYPE_TEXT": {
       // form_input sets the value directly and fires the events a framework
       // listens for — one round trip, no focus dance. It only works on real

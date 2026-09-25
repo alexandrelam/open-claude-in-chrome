@@ -587,6 +587,73 @@ const KEY_MAP = {
   f7: "F7", f8: "F8", f9: "F9", f10: "F10", f11: "F11", f12: "F12",
 };
 
+// What CDP needs to turn a dispatched key event into a real one.
+//
+// Input.dispatchKeyEvent will not produce character input or a default action
+// (submitting a form, moving a caret) from `key` alone. It needs the correct
+// windowsVirtualKeyCode, and for printable keys a `text` payload. Passing the
+// wrong code silently does nothing at all, which is what used to happen here:
+// the VK was computed as key.charCodeAt(0), giving 69 for "Enter" instead of 13
+// and 97 for "a" instead of 65, so every key press was inert.
+const KEY_DEFS = {
+  Enter: { vk: 13, text: "\r" },
+  Tab: { vk: 9, text: "\t" },
+  Escape: { vk: 27 },
+  Backspace: { vk: 8 },
+  Delete: { vk: 46 },
+  Space: { vk: 32, key: " ", text: " " },
+  ArrowUp: { vk: 38 }, ArrowDown: { vk: 40 },
+  ArrowLeft: { vk: 37 }, ArrowRight: { vk: 39 },
+  Home: { vk: 36 }, End: { vk: 35 },
+  PageUp: { vk: 33 }, PageDown: { vk: 34 },
+  F1: { vk: 112 }, F2: { vk: 113 }, F3: { vk: 114 }, F4: { vk: 115 },
+  F5: { vk: 116 }, F6: { vk: 117 }, F7: { vk: 118 }, F8: { vk: 119 },
+  F9: { vk: 120 }, F10: { vk: 121 }, F11: { vk: 122 }, F12: { vk: 123 },
+};
+
+// Punctuation that sits on an unshifted US key, so `code` is right for layouts
+// that care. Anything unlisted falls back to no code, which browsers tolerate.
+const PUNCT_CODES = {
+  "-": "Minus", "=": "Equal", "[": "BracketLeft", "]": "BracketRight",
+  "\\": "Backslash", ";": "Semicolon", "'": "Quote", ",": "Comma",
+  ".": "Period", "/": "Slash", "`": "Backquote",
+};
+
+/**
+ * Build the full Input.dispatchKeyEvent payload for one resolved key.
+ * `modifiers` is the CDP bitmask: alt 1, ctrl 2, meta 4, shift 8.
+ */
+function keyEventFields(resolvedKey, modifiers) {
+  const def = KEY_DEFS[resolvedKey];
+  if (def) {
+    return {
+      key: def.key ?? resolvedKey,
+      code: resolvedKey,
+      windowsVirtualKeyCode: def.vk,
+      // A control or command chord is a shortcut, not typing: sending text
+      // alongside it would insert a stray character as well as firing the
+      // shortcut.
+      text: def.text && !(modifiers & 2) && !(modifiers & 4) ? def.text : undefined,
+    };
+  }
+  if (resolvedKey.length === 1) {
+    const ch = modifiers & 8 ? resolvedKey.toUpperCase() : resolvedKey;
+    const upper = resolvedKey.toUpperCase();
+    let code;
+    if (upper >= "A" && upper <= "Z") code = `Key${upper}`;
+    else if (resolvedKey >= "0" && resolvedKey <= "9") code = `Digit${resolvedKey}`;
+    else code = PUNCT_CODES[resolvedKey];
+    return {
+      key: ch,
+      code,
+      windowsVirtualKeyCode: upper.charCodeAt(0),
+      text: !(modifiers & 2) && !(modifiers & 4) ? ch : undefined,
+    };
+  }
+  // An unknown named key: send what we have rather than a wrong VK code.
+  return { key: resolvedKey, code: resolvedKey, windowsVirtualKeyCode: 0 };
+}
+
 function parseKeyCombo(keyStr) {
   const parts = keyStr.split("+").map((p) => p.trim().toLowerCase());
   let modifiers = 0;
@@ -1598,19 +1665,26 @@ const toolHandlers = {
         for (let r = 0; r < repeat; r++) {
           for (const keyStr of keys) {
             const { key, modifiers: keyMod } = parseKeyCombo(keyStr);
-            const resolvedKey = key.length === 1 ? key : key;
+            const f = keyEventFields(key, keyMod);
+            // keyDown carries `text`; keyUp must not, or the character is
+            // entered twice. rawKeyDown is the type CDP wants when there is no
+            // text, and it is what makes shortcuts and navigation keys fire.
             await cdp(tabId, "Input.dispatchKeyEvent", {
-              type: "keyDown",
-              key: resolvedKey,
-              code: resolvedKey.length === 1 ? `Key${resolvedKey.toUpperCase()}` : resolvedKey,
+              type: f.text ? "keyDown" : "rawKeyDown",
+              key: f.key,
+              code: f.code,
               modifiers: keyMod,
-              windowsVirtualKeyCode: resolvedKey.charCodeAt ? resolvedKey.charCodeAt(0) : 0,
+              windowsVirtualKeyCode: f.windowsVirtualKeyCode,
+              nativeVirtualKeyCode: f.windowsVirtualKeyCode,
+              ...(f.text ? { text: f.text, unmodifiedText: f.text } : {}),
             });
             await cdp(tabId, "Input.dispatchKeyEvent", {
               type: "keyUp",
-              key: resolvedKey,
-              code: resolvedKey.length === 1 ? `Key${resolvedKey.toUpperCase()}` : resolvedKey,
+              key: f.key,
+              code: f.code,
               modifiers: keyMod,
+              windowsVirtualKeyCode: f.windowsVirtualKeyCode,
+              nativeVirtualKeyCode: f.windowsVirtualKeyCode,
             });
             // Brave's debugger pipeline needs a settle window between key
             // events; Chrome acks instantly, so the sleep is pure latency there.

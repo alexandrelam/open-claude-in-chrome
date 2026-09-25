@@ -1902,6 +1902,23 @@ const toolHandlers = {
     return { content: [{ type: "text", text: tree }] };
   },
 
+  // Hidden (not in tool-definitions.js): the Jev loop's whole observation in
+  // one round trip — structured rows, on-screen text, url, title and scroll —
+  // instead of read_page + get_page_text + tabs_context_mcp and a text format
+  // the host then had to parse back apart.
+  async jev_snapshot(args) {
+    const { tabId } = args;
+    if (!(await isInGroup(tabId))) return { content: [{ type: "text", text: `Error: Tab ${tabId} is not in the MCP group.` }] };
+    let resp;
+    try {
+      resp = await sendContentMessage(tabId, { type: "jevSnapshot", options: { depth: args.depth, max_rows: args.max_rows, text_chars: args.text_chars } });
+    } catch (e) {
+      return { content: [{ type: "text", text: `Error: Could not snapshot the page: ${e?.message ?? e}` }] };
+    }
+    if (!resp?.result) return { content: [{ type: "text", text: "Error: Could not snapshot the page" }] };
+    return { content: [{ type: "text", text: JSON.stringify(resp.result) }] };
+  },
+
   async get_page_text(args) {
     const { tabId } = args;
     if (!(await isInGroup(tabId))) return { content: [{ type: "text", text: `Tab ${tabId} is not in the MCP group.` }] };

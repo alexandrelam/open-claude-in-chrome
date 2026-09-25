@@ -249,14 +249,83 @@ export function parseTabContext(text, tabId) {
   }
 }
 
+/** A snapshot row in the shape parseLine produces, plus where it sits on screen. */
+function snapshotRow(r) {
+  // read_page's text format turned bare true/false into booleans on parse;
+  // keep that, so both paths hand the rest of the loop the same values.
+  const flag = (v) => (v === "true" ? true : v === "false" ? false : v);
+  return {
+    ref: r.ref,
+    role: r.role || "",
+    // A name can span lines (a banner link with "Learn more" under it); the
+    // old text format split such a row in two and garbled the rest of the page.
+    name: (r.name || "").replace(/\s+/g, " ").trim(),
+    indent: r.indent ?? 0,
+    href: r.href || "",
+    src: r.src || "",
+    value: r.value ?? "",
+    type: r.type || "",
+    section: r.section || "",
+    expanded: flag(r.expanded),
+    checked: flag(r.checked),
+    selected: flag(r.selected),
+    disabled: Boolean(r.disabled),
+    options: Array.isArray(r.options) ? r.options : null,
+    inView: r.inView
+  };
+}
+
+// Whether a given callTool's extension has jev_snapshot. Per callTool rather
+// than global, so one old extension (or a test's fake) doesn't decide for all.
+const snapshotSupport = new WeakMap();
+
 /**
  * One full observation of a tab.
  *
- * The three calls are independent and the runtime multiplexes on a request id
- * (host/tool-runtime.js L176), so they go out together rather than serially —
- * this is most of the per-step browser latency.
+ * Normally one jev_snapshot call. An extension that predates it gets the old
+ * three-call observation instead, so an unreloaded extension still works.
  */
-export async function observe(
+export async function observe(callTool, tabId, opts = {}) {
+  const { excerptChars = 300 } = opts;
+  if (snapshotSupport.get(callTool) !== false) {
+    const res = await callTool("jev_snapshot", { tabId, depth: opts.depth ?? 30 });
+    const text = resultText(res);
+    if (isToolError(res) && !/Unknown tool/i.test(text)) return { error: text };
+    let snap = null;
+    try {
+      snap = isToolError(res) ? null : JSON.parse(text);
+    } catch {}
+    if (snap && Array.isArray(snap.rows) && typeof snap.url === "string") {
+      snapshotSupport.set(callTool, true);
+      const rows = snap.rows.map(snapshotRow);
+      const usable = usableRows(rows);
+      // Keep it SHORT — see observeLegacy for the measurement behind 300.
+      const excerpt = dropElementEcho(snap.text || "", usable, snap.title || "")
+        .replace(/\s+/g, " ")
+        .trim()
+        .slice(0, excerptChars);
+      return {
+        url: snap.url,
+        title: snap.title || "",
+        rows: usable,
+        allRows: rows,
+        truncated: Boolean(snap.truncated),
+        excerpt,
+        scroll: snap.scroll ?? null
+      };
+    }
+    snapshotSupport.set(callTool, false);
+  }
+  return observeLegacy(callTool, tabId, opts);
+}
+
+/**
+ * The observation before jev_snapshot existed: three tool calls.
+ *
+ * The three calls are independent and the runtime multiplexes on a request id
+ * (host/tool-runtime.js L176), so they go out together rather than serially.
+ */
+async function observeLegacy(
   callTool,
   tabId,
   { excerptChars = 300, maxChars = 400_000, depth = 30 } = {}

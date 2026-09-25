@@ -198,14 +198,26 @@ function renderPage(rows) {
     .join("\n");
 }
 
-/** A fake browser: enough of the three observation tools to drive the loop. */
-function fakeBrowser({ url = "https://app.test/a", title = "A", rows = [], onClick } = {}) {
+/**
+ * A fake browser: enough of the observation tools to drive the loop.
+ *
+ * Serves jev_snapshot like a current extension; `legacy: true` makes it answer
+ * like one that predates it, so the three-call fallback is driven instead.
+ */
+function fakeBrowser({ url = "https://app.test/a", title = "A", rows = [], onClick, legacy = false } = {}) {
   const state = { url, title, rows };
   const calls = [];
   const text = (t) => ({ content: [{ type: "text", text: t }] });
   const callTool = async (name, args) => {
     calls.push({ name, args });
     switch (name) {
+      case "jev_snapshot":
+        if (legacy) return text("Error: Unknown tool: jev_snapshot");
+        return text(JSON.stringify({
+          url: state.url, title: state.title, text: "page body text", truncated: Boolean(state.truncated),
+          scroll: state.scroll ?? { y: 0, height: 800, viewport: 800 },
+          rows: state.rows.map((r) => ({ inView: true, ...r }))
+        }));
       case "read_page":
         return text(renderPage(state.rows));
       case "get_page_text":
@@ -344,7 +356,7 @@ await check("a link click waits for its navigation, not for the dropdown closing
   });
   const inner = browser.callTool;
   const callTool = async (name, args) => {
-    if (name === "tabs_context_mcp" && pending > 0 && --pending === 0) {
+    if (name === "jev_snapshot" && pending > 0 && --pending === 0) {
       browser.state.url = "https://app.test/whatlinkshere";
       browser.state.title = "What links here";
     }
@@ -364,7 +376,7 @@ await check("a truncated observation is named when the run does not finish", asy
   // read_page has its own character cap, and an Octopus article blows past it
   // at 1,412 rows. Rows lost there never reach the prefilter, so "nothing here
   // can help" is the wrong conclusion and has to say why it might be wrong.
-  const browser = fakeBrowser({ rows: [row({ ref: "ref_1", role: "button", name: "Go" })] });
+  const browser = fakeBrowser({ rows: [row({ ref: "ref_1", role: "button", name: "Go" })], legacy: true });
   const inner = browser.callTool;
   const callTool = async (name, args) => {
     const r = await inner(name, args);
@@ -375,6 +387,42 @@ await check("a truncated observation is named when the run does not finish", asy
   const out = await navigate(callTool, client, CFG, { tabId: 1, goal: "g", success_criteria: "s" });
   eq(out.status, "blocked", "status");
   assert(out.reason.includes("too large to read in full"), `reason should name truncation: ${out.reason}`);
+});
+
+await check("a truncated snapshot is named too", async () => {
+  const browser = fakeBrowser({ rows: [row({ ref: "ref_1", role: "button", name: "Go" })] });
+  browser.state.truncated = true;
+  const client = fakeClient([{ operation: choice("BLOCKED", 0.9), sensitive: noul(0), satisfied: notYet }]);
+  const out = await navigate(browser.callTool, client, CFG, { tabId: 1, goal: "g", success_criteria: "s" });
+  assert(out.reason.includes("too large to read in full"), `reason should name truncation: ${out.reason}`);
+});
+
+await check("one snapshot call per observation, and none of the old three", async () => {
+  const browser = fakeBrowser({ rows: [row({ ref: "ref_1", role: "button", name: "Go" })] });
+  const client = fakeClient([{ operation: choice("BLOCKED", 0.9), sensitive: noul(0), satisfied: notYet }]);
+  await navigate(browser.callTool, client, CFG, { tabId: 1, goal: "g", success_criteria: "s" });
+  const names = browser.calls.map((c) => c.name);
+  eq(names.filter((n) => n === "jev_snapshot").length, 1, "one snapshot");
+  assert(!names.some((n) => ["read_page", "get_page_text", "tabs_context_mcp"].includes(n)), `old tools called: ${names}`);
+});
+
+await check("an extension without jev_snapshot falls back once, then stops asking", async () => {
+  // An unreloaded extension answers Unknown tool. The loop must still work,
+  // and must not spend a failed round trip on every observation after that.
+  let clicks = 0;
+  const browser = fakeBrowser({
+    legacy: true,
+    rows: [row({ ref: "ref_1", role: "link", name: "Go", href: "https://app.test/next" })],
+    onClick: (s) => { clicks++; s.url = `https://app.test/${clicks}`; }
+  });
+  const client = fakeClient([
+    { operation: choice("CLICK", 0.95), click_target: choice("e1", 0.95), sensitive: noul(0), satisfied: notYet },
+    { operation: choice("DONE", 0.95), sensitive: noul(0), satisfied: noul(0.95) }
+  ]);
+  const out = await navigate(browser.callTool, client, CFG, { tabId: 1, goal: "g", success_criteria: "s" });
+  eq(out.status, "done", `reason: ${out.reason}`);
+  eq(browser.calls.filter((c) => c.name === "jev_snapshot").length, 1, "asked once");
+  assert(browser.calls.filter((c) => c.name === "read_page").length >= 2, "then used the old path");
 });
 
 await check("jev_decide returns a short distribution in one id space", async () => {
@@ -413,7 +461,7 @@ await check("a submit is judged on the URL, not on the text it just typed", asyn
   });
   const realRead = browser.callTool;
   const callTool = async (name, args) => {
-    if (name === "tabs_context_mcp" && pending > 0 && --pending === 0) {
+    if (name === "jev_snapshot" && pending > 0 && --pending === 0) {
       browser.state.url = "https://app.test/results";
       browser.state.title = "Results";
     }
@@ -542,9 +590,9 @@ await check("one observation per step in the steady state", async () => {
   const client = fakeClient([{ operation: choice("CLICK", 0.95), click_target: choice("e1", 0.95), sensitive: noul(0), satisfied: notYet }]);
   const out = await navigate(browser.callTool, client, CFG, { tabId: 1, goal: "g", success_criteria: "s", max_steps: 4 });
   eq(out.steps.length, 4, "four steps");
-  const reads = browser.calls.filter((c) => c.name === "read_page").length;
+  const reads = browser.calls.filter((c) => c.name === "jev_snapshot").length;
   // One to prime the first step, then one after each action.
-  eq(reads, 5, `expected 5 read_page calls for 4 steps, got ${reads}`);
+  eq(reads, 5, `expected 5 snapshots for 4 steps, got ${reads}`);
 });
 
 // --- subgoal chaining -------------------------------------------------------

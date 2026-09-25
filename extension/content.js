@@ -211,31 +211,62 @@
     return Boolean(el.closest('[aria-hidden="true"], [inert]'));
   }
 
-  function generateAccessibilityTree(options = {}) {
+  // One interactive/visible element, as structured fields. The single source
+  // of what a row says: read_page's text line is formatted from this, and
+  // jev_snapshot returns it as-is, so the two cannot drift apart.
+  function describeRow(el, tag, role, name, landmark) {
+    const row = { ref: getOrAssignRef(el), role: role || "", name: name ? name.substring(0, 100) : "" };
+    if (tag === "a" && el.href) row.href = el.href;
+    if (tag === "img" && el.src) row.src = el.src.substring(0, 100);
+    if (["input", "textarea"].includes(tag) && el.value) row.value = el.value.substring(0, 100);
+    if (tag === "input") row.type = el.type || "text";
+    if (el.getAttribute("aria-expanded")) row.expanded = el.getAttribute("aria-expanded");
+    if (el.getAttribute("aria-checked")) row.checked = el.getAttribute("aria-checked");
+    else if (tag === "input" && (el.type === "checkbox" || el.type === "radio")) row.checked = el.checked;
+    if (el.getAttribute("aria-selected")) row.selected = el.getAttribute("aria-selected");
+    if (el.disabled) row.disabled = true;
+    // Which part of the page this control belongs to. Without it a form of
+    // repeated cards is an undifferentiated list in which the same label
+    // appears once per card and none of them can be told apart.
+    if (landmark && landmark !== name) row.section = landmark;
+    if (tag === "select") {
+      const opts = Array.from(el.options).map((o) => ({ value: o.value, label: o.textContent.trim(), selected: o.selected }));
+      if (opts.length) row.options = opts;
+    }
+    return row;
+  }
+
+  function formatRow(indent, row) {
+    let line = `${indent}`;
+    if (row.role) line += `${row.role}`;
+    if (row.name) line += ` "${row.name}"`;
+    line += ` [${row.ref}]`;
+    if (row.href) line += ` href="${row.href}"`;
+    if (row.src) line += ` src="${row.src}"`;
+    if (row.value) line += ` value="${row.value}"`;
+    if (row.type) line += ` type="${row.type}"`;
+    if (row.expanded) line += ` expanded=${row.expanded}`;
+    if (row.checked !== undefined) line += ` checked=${row.checked}`;
+    if (row.selected) line += ` selected=${row.selected}`;
+    if (row.disabled) line += " disabled";
+    if (row.section) line += ` section="${row.section}"`;
+    if (row.options) {
+      line += ` options=[${row.options.map((o) => `${o.selected ? "*" : " "}${o.value}="${o.label}"`).join(", ")}]`;
+    }
+    return line;
+  }
+
+  // Walk the page the way read_page always has, calling visit(el, row, indent)
+  // for every element that is shown. visit returns false to stop the walk.
+  // Returns an error string if startRefId cannot be resolved, else null.
+  function walkRows(options, visit) {
     const filter = options.filter || "all";
     const maxDepth = options.depth || 15;
-    const maxChars = options.max_chars || 50000;
     const startRefId = options.ref_id || null;
-
-    let output = "";
-    let charCount = 0;
-    let truncated = false;
-
-    function append(text) {
-      if (truncated) return false;
-      if (charCount + text.length > maxChars) {
-        output += text.substring(0, maxChars - charCount);
-        output += "\n... (truncated)";
-        truncated = true;
-        return false;
-      }
-      output += text;
-      charCount += text.length;
-      return true;
-    }
+    let stopped = false;
 
     function walk(el, depth, indent, landmark) {
-      if (truncated) return;
+      if (stopped) return;
       if (depth > maxDepth) return;
       if (!el || el.nodeType !== 1) return;
 
@@ -244,51 +275,28 @@
       if (["script", "style", "noscript", "template"].includes(tag)) return;
       if (isHiddenFromA11y(el)) return;
 
-      const role = getRole(el);
-      const name = getAccessibleName(el);
       const interactive = isInteractive(el);
-      const visible = isVisible(el);
 
       // Filter: if interactive-only mode, skip non-interactive non-container elements
       const isContainer = el.children.length > 0;
       if (filter === "interactive" && !interactive && !isContainer) return;
 
+      // Name and style are the expensive part of the walk (a container's name
+      // reads its whole textContent), so an element that cannot be shown
+      // never pays for them. Nothing below reads either unless it is shown.
+      const role = filter === "all" || interactive ? getRole(el) : null;
+      const name = filter === "all" || interactive ? getAccessibleName(el) : "";
+
       const shouldShow =
         (filter === "all" && (role || name)) ||
         (filter === "interactive" && interactive);
+      const visible = shouldShow && isVisible(el);
 
       if (shouldShow && visible) {
-        const ref = getOrAssignRef(el);
-        let line = `${indent}`;
-
-        if (role) line += `${role}`;
-        if (name) line += ` "${name.substring(0, 100)}"`;
-        line += ` [${ref}]`;
-
-        // Extra info for specific elements
-        if (tag === "a" && el.href) line += ` href="${el.href}"`;
-        if (tag === "img" && el.src) line += ` src="${el.src.substring(0, 100)}"`;
-        if (["input", "textarea"].includes(tag) && el.value) line += ` value="${el.value.substring(0, 100)}"`;
-        if (tag === "input") line += ` type="${el.type || "text"}"`;
-        if (el.getAttribute("aria-expanded")) line += ` expanded=${el.getAttribute("aria-expanded")}`;
-        if (el.getAttribute("aria-checked")) line += ` checked=${el.getAttribute("aria-checked")}`;
-        else if (tag === "input" && (el.type === "checkbox" || el.type === "radio")) line += ` checked=${el.checked}`;
-        if (el.getAttribute("aria-selected")) line += ` selected=${el.getAttribute("aria-selected")}`;
-        if (el.disabled) line += " disabled";
-        // Which part of the page this control belongs to. Without it a form of
-        // repeated cards is an undifferentiated list in which the same label
-        // appears once per card and none of them can be told apart.
-        if (landmark && landmark !== name) line += ` section="${landmark}"`;
-
-        // Select options
-        if (tag === "select") {
-          const opts = Array.from(el.options).map(
-            (o) => `${o.selected ? "*" : " "}${o.value}="${o.textContent.trim()}"`
-          );
-          if (opts.length) line += ` options=[${opts.join(", ")}]`;
+        if (visit(el, describeRow(el, tag, role, name, landmark), indent) === false) {
+          stopped = true;
+          return;
         }
-
-        if (!append(line + "\n")) return;
       }
 
       // Recurse children (including shadow DOM)
@@ -321,11 +329,83 @@
     }
 
     walk(root, 0, "", root === document.body ? null : regionNameFor(root));
-    return output;
+    return null;
+  }
+
+  function generateAccessibilityTree(options = {}) {
+    const maxChars = options.max_chars || 50000;
+    let output = "";
+    let charCount = 0;
+
+    const error = walkRows(options, (el, row, indent) => {
+      const text = formatRow(indent, row) + "\n";
+      if (charCount + text.length > maxChars) {
+        output += text.substring(0, maxChars - charCount);
+        output += "\n... (truncated)";
+        return false;
+      }
+      output += text;
+      charCount += text.length;
+      return true;
+    });
+    return error || output;
+  }
+
+  // Text the user can actually see: text nodes inside the main content region
+  // (the same region get_page_text picks) whose box intersects the viewport.
+  // Off-screen article bodies and footers never reach the decision model.
+  function visibleText(maxChars) {
+    const root = pickContentRoot();
+    const words = [];
+    let length = 0;
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+    const range = document.createRange();
+    let node;
+    while ((node = walker.nextNode()) && length < maxChars) {
+      const value = node.textContent.replace(/\s+/g, " ").trim();
+      const parent = node.parentElement;
+      if (!value || !parent || parent.closest("script,style,noscript,template,svg")) continue;
+      range.selectNodeContents(node);
+      const r = range.getBoundingClientRect();
+      if (r.width > 0 && r.height > 0 && r.bottom > 0 && r.top < innerHeight && r.right > 0 && r.left < innerWidth) {
+        words.push(value);
+        length += value.length + 1;
+      }
+    }
+    return words.join(" ").slice(0, maxChars);
+  }
+
+  // Everything the Jev loop needs from one observation, in one message:
+  // structured rows (no text format to parse), what is on screen, and where
+  // the page is scrolled. Replaces read_page + get_page_text + tabs_context.
+  function jevSnapshot(options = {}) {
+    const maxRows = options.max_rows || 3000;
+    const rows = [];
+    let truncated = false;
+    walkRows({ filter: "interactive", depth: options.depth || 30 }, (el, row, indent) => {
+      if (rows.length >= maxRows) {
+        truncated = true;
+        return false;
+      }
+      const r = el.getBoundingClientRect();
+      row.indent = indent.length;
+      row.inView = r.width > 0 && r.height > 0 && r.bottom > 0 && r.top < innerHeight && r.right > 0 && r.left < innerWidth;
+      rows.push(row);
+      return true;
+    });
+    const height = document.documentElement.scrollHeight;
+    return {
+      url: location.href,
+      title: document.title || "",
+      rows,
+      truncated,
+      text: visibleText(options.text_chars || 2000),
+      scroll: { y: Math.round(scrollY), height, viewport: innerHeight }
+    };
   }
 
   // --- Page text extraction ---
-  function getPageText() {
+  function pickContentRoot() {
     const selectors = [
       "article",
       "main",
@@ -336,13 +416,15 @@
       ".content",
       "#content",
     ];
-    let source = null;
     for (const sel of selectors) {
-      source = document.querySelector(sel);
-      if (source) break;
+      const source = document.querySelector(sel);
+      if (source) return source;
     }
-    if (!source) source = document.body;
+    return document.body;
+  }
 
+  function getPageText() {
+    const source = pickContentRoot();
     const title = document.title || "";
     const url = location.href;
     const tag = source.tagName.toLowerCase();
@@ -659,6 +741,11 @@
       return true;
     }
 
+    if (msg.type === "jevSnapshot") {
+      sendResponse({ result: jevSnapshot(msg.options || {}) });
+      return true;
+    }
+
     if (msg.type === "getPageText") {
       const result = getPageText();
       sendResponse({ result });
@@ -727,6 +814,7 @@
   window.__unblockedChrome = {
     describePoint,
     generateAccessibilityTree,
+    jevSnapshot,
     getPageText,
     findElements,
     setFormValue,

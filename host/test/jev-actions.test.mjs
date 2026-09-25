@@ -16,7 +16,7 @@ import {
 } from "../jev/actions.js";
 import { resolveConfig, configError, MAX_STEPS_CEILING, MAX_CHOICES } from "../jev/config.js";
 import { splitSections, shortlistRows, estimateTokens, STATE_TOKEN_BUDGET, renderRow } from "../jev/shortlist.js";
-import { prefilter, isNoise, isControl, termsFrom } from "../jev/relevance.js";
+import { prefilter, isNoise, isControl, termsFrom, OFFSCREEN_MATCH_CAP } from "../jev/relevance.js";
 
 const results = [];
 async function check(name, fn) {
@@ -341,6 +341,59 @@ await check("rowLabel degrades to href then ref rather than returning nothing", 
   eq(rowLabel(row({ role: "button", name: "Go" })), 'button "Go"', "role and name");
   eq(rowLabel(row({ href: "https://x.test" })), "https://x.test", "href fallback");
   eq(rowLabel(row({ ref: "ref_9" })), "ref_9", "ref fallback");
+});
+
+// --- viewport narrowing (jev_snapshot rows carry inView) -------------------
+
+await check("off-screen rows are dropped unless the goal names them", async () => {
+  const rows = [
+    row({ ref: "ref_1", role: "link", name: "Home", href: "https://x.test/", inView: true }),
+    row({ ref: "ref_2", role: "link", name: "Footer thing", href: "https://x.test/f", inView: false }),
+    row({ ref: "ref_3", role: "link", name: "Nautilus", href: "https://x.test/n", inView: false })
+  ];
+  const out = prefilter(rows, { goal: "open Nautilus", successCriteria: "s", values: {}, limit: 50 });
+  eq(out.rows.map((r) => r.ref).join(), "ref_1,ref_3", "on-screen kept, off-screen goal match kept");
+  eq(out.offscreen, 1, "the unmatched off-screen row is counted");
+});
+
+await check("off-screen goal matches are capped, strongest first", async () => {
+  const rows = [];
+  for (let i = 0; i < OFFSCREEN_MATCH_CAP + 20; i++) {
+    rows.push(row({ ref: `ref_${i}`, role: "link", name: `History ${i}`, href: `https://x.test/${i}`, inView: false }));
+  }
+  rows.push(row({ ref: "ref_best", role: "link", name: "Revision history", href: "https://x.test/rev", inView: false }));
+  const out = prefilter(rows, { goal: "open the revision history", successCriteria: "s", values: {}, limit: 240 });
+  eq(out.rows.length, OFFSCREEN_MATCH_CAP, "capped");
+  assert(out.rows.some((r) => r.ref === "ref_best"), "the two-word match survives the cap");
+});
+
+await check("the site's own name is not a goal match", async () => {
+  // Every href on Wikipedia contains "wikipedia", so the word made every
+  // link a goal match and nothing was narrowed.
+  const rows = [
+    row({ ref: "ref_1", role: "searchbox", name: "Search", type: "search", inView: true }),
+    row({ ref: "ref_2", role: "link", name: "Octopus", href: "https://en.wikipedia.org/wiki/Octopus", inView: false })
+  ];
+  const out = prefilter(rows, { goal: "Search Wikipedia for Nautilus", successCriteria: "s", values: {}, limit: 50, pageUrl: "https://en.wikipedia.org/wiki/Main_Page" });
+  eq(out.rows.map((r) => r.ref).join(), "ref_1", "the off-screen link only matched on the site name");
+});
+
+await check("rows without view information keep the old tiers", async () => {
+  const rows = [row({ ref: "ref_1", role: "link", name: "Anything", href: "https://x.test/a" })];
+  const out = prefilter(rows, { goal: "g", successCriteria: "s", values: {}, limit: 50 });
+  eq(out.rows.length, 1, "nothing dropped for being off screen");
+});
+
+await check("scrolls are offered only in a direction the page can move", async () => {
+  const links = [row({ role: "link", href: "https://x.test" })];
+  const top = availableOperations(links, { y: 0, height: 3000, viewport: 800 });
+  assert(top.includes("SCROLL_DOWN") && !top.includes("SCROLL_UP"), `at the top: ${top}`);
+  const bottom = availableOperations(links, { y: 2200, height: 3000, viewport: 800 });
+  assert(!bottom.includes("SCROLL_DOWN") && bottom.includes("SCROLL_UP"), `at the bottom: ${bottom}`);
+  const short = availableOperations(links, { y: 0, height: 700, viewport: 800 });
+  assert(!short.includes("SCROLL_DOWN") && !short.includes("SCROLL_UP"), `a page that fits: ${short}`);
+  const unknown = availableOperations(links);
+  assert(unknown.includes("SCROLL_DOWN") && unknown.includes("SCROLL_UP"), "no scroll info: both, as before");
 });
 
 const failed = results.filter((r) => !r.ok);

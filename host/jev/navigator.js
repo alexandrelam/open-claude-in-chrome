@@ -107,7 +107,7 @@ export function buildRequest(obs, rows, { goal, successCriteria, values }, next 
     values: valueKeys
   };
 
-  const questions = goalQuestions(idMap, { successCriteria, values }, "", "");
+  const questions = goalQuestions(idMap, obs.scroll, { successCriteria, values }, "", "");
 
   // Speculative questions for the NEXT subgoal, answered on this same page.
   //
@@ -121,7 +121,7 @@ export function buildRequest(obs, rows, { goal, successCriteria, values }, next 
     const preamble =
       `Assume the current goal is already complete. The NEXT goal is: ${next.goal}. ` +
       `Its success criteria: ${next.successCriteria}. Answer for that NEXT goal. `;
-    Object.assign(questions, goalQuestions(idMap, next, "next_", preamble));
+    Object.assign(questions, goalQuestions(idMap, obs.scroll, next, "next_", preamble));
   }
 
   return { state, questions, idMap };
@@ -132,8 +132,8 @@ export function buildRequest(obs, rows, { goal, successCriteria, values }, next 
  * The current goal is carried by `state`; a prefixed goal carries its own
  * description in `preamble`, because state can only describe one.
  */
-function goalQuestions(idMap, { successCriteria, values }, prefix, preamble) {
-  const ops = availableOperations([...idMap.values()]);
+function goalQuestions(idMap, scroll, { successCriteria, values }, prefix, preamble) {
+  const ops = availableOperations([...idMap.values()], scroll);
   const valueKeys = Object.keys(values || {});
 
   const operationCriteria = {};
@@ -333,7 +333,7 @@ export async function decideOnce(callTool, client, cfg, args) {
   if (failure) return { status: failure.status, reason: failure.reason };
 
   const short = await shortlistRows(obs.rows, {
-    goal, successCriteria, values, maxRows: cfg.maxRows,
+    goal, successCriteria, values, maxRows: cfg.maxRows, pageUrl: obs.url,
     decide: (s, q) => client.decide(s, q)
   });
   const { state, questions, idMap } = buildRequest(obs, short.rows, { goal, successCriteria, values });
@@ -451,6 +451,10 @@ async function runSubgoal(callTool, client, cfg, sub, opts, ctx) {
     let short, request, answers, jevMs = 0, verdict, inputTokens = 0;
     const carried = carry && carry.obs === obs ? carry : null;
     carry = null;
+    // The next leg's questions ride along only once this leg has acted: they
+    // double the target heads, and a leg is almost never finished before its
+    // first action (the previous leg's next_satisfied covers that case).
+    const ask = steps.length > 0 ? next : null;
     if (carried) {
       // Decided by the previous leg's request, on this very observation.
       ({ short, request, answers, verdict } = carried);
@@ -459,13 +463,14 @@ async function runSubgoal(callTool, client, cfg, sub, opts, ctx) {
         // Shortlist for both goals when the next one rides along, so the rows
         // its first action needs are on offer too.
         short = await shortlistRows(obs.rows, {
-          goal: next ? `${goal} ${next.goal}` : goal,
-          successCriteria: next ? `${successCriteria} ${next.successCriteria}` : successCriteria,
-          values: next ? { ...next.values, ...values } : values,
+          goal: ask ? `${goal} ${ask.goal}` : goal,
+          successCriteria: ask ? `${successCriteria} ${ask.successCriteria}` : successCriteria,
+          values: ask ? { ...ask.values, ...values } : values,
           maxRows: cfg.maxRows,
+          pageUrl: obs.url,
           decide: (st, q) => client.decide(st, q)
         });
-        request = buildRequest(obs, short.rows, { goal, successCriteria, values }, next);
+        request = buildRequest(obs, short.rows, { goal, successCriteria, values }, ask);
         const res = await client.decide(request.state, request.questions);
         answers = res.answers;
         jevMs = res.ms;
@@ -482,7 +487,7 @@ async function runSubgoal(callTool, client, cfg, sub, opts, ctx) {
 
     trace.step({
       i, subgoal: goal, url: obs.url, title: obs.title, carried: Boolean(carried),
-      rows_offered: short.rows.length, rows_cut: short.cut, truncated: obs.truncated,
+      rows_offered: short.rows.length, rows_cut: short.cut, rows_offscreen: short.offscreen ?? null, truncated: obs.truncated,
       satisfied, answers: carried ? null : answers,
       verdict: { ok: verdict.ok, status: verdict.status ?? null, reason: verdict.reason ?? null },
       operation: verdict.operation, target_ref: verdict.row?.ref ?? null,
@@ -493,7 +498,7 @@ async function runSubgoal(callTool, client, cfg, sub, opts, ctx) {
     // action and before any gate: if the page already satisfies the criteria,
     // there is nothing left to do and nothing to refuse.
     if (satisfied > 0.5) {
-      return { status: "done", reason: null, steps, satisfied, carry: next && !carried ? carryFor(answers, request, short, obs, next, cfg, allowSensitive) : null };
+      return { status: "done", reason: null, steps, satisfied, carry: ask && !carried ? carryFor(answers, request, short, obs, ask, cfg, allowSensitive) : null };
     }
 
     if (!verdict.ok) return { status: verdict.status, reason: verdict.reason, steps };

@@ -79,11 +79,11 @@ const SCALE = ["Irrelevant", "Possibly relevant", "Directly relevant"];
  * row that was cut cannot be chosen, and that is the first thing to check when
  * a step comes back BLOCKED on a page that plainly had the right button.
  */
-export async function shortlistRows(rows, { goal, successCriteria, values, maxRows, decide }) {
+export async function shortlistRows(rows, { goal, successCriteria, values, maxRows, decide, pageUrl }) {
   // Deterministic narrowing first. It costs nothing, and on a dense page it
   // usually gets under the cap on its own — which is the whole point, because
   // the scoring pass below is a second Jev round trip on every step.
-  const pre = prefilter(rows, { goal, successCriteria, values, limit: maxRows });
+  const pre = prefilter(rows, { goal, successCriteria, values, limit: maxRows, pageUrl });
   const narrowed = pre.rows;
 
   const fits =
@@ -95,6 +95,7 @@ export async function shortlistRows(rows, { goal, successCriteria, values, maxRo
       rows: narrowed,
       cut: rows.length - narrowed.length,
       noise: pre.noise,
+      offscreen: pre.offscreen,
       scored: false,
       sections: 1
     };

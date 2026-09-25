@@ -656,14 +656,16 @@ await check("a finished leg hands the next leg its first action, saving a reques
   eq(client.seen.length, 3, "3 requests, not 4");
   eq(clicks, 2, "both legs acted");
   eq(out.subgoals[1].steps.length, 1, "the carried action is the second leg's step");
-  assert(client.seen[0].questions.next_operation, "a non-final leg asks the next leg's questions");
-  assert(client.seen[0].questions.next_operation.instructions.includes("second leg"), "naming the next goal");
+  assert(!client.seen[0].questions.next_operation, "not before the leg has acted");
+  assert(client.seen[1].questions.next_operation, "a non-final leg asks the next leg's questions once it has acted");
+  assert(client.seen[1].questions.next_operation.instructions.includes("second leg"), "naming the next goal");
   assert(!client.seen[2].questions.next_operation, "the last leg has no next leg to ask about");
 });
 
 await check("a carried action that fails the gate is re-asked, never executed", async () => {
-  const browser = fakeBrowser({ rows: [row({ ref: "ref_1", role: "button", name: "Proceed" })] });
+  const browser = fakeBrowser({ rows: [row({ ref: "ref_1", role: "button", name: "Proceed" })], onClick: (s) => { s.url = "https://app.test/b"; } });
   const client = fakeClient([
+    { operation: choice("CLICK", 0.95), click_target: choice("e1", 0.95), sensitive: noul(0), satisfied: notYet },
     { operation: choice("DONE", 0.95), sensitive: noul(0), satisfied: noul(0.95),
       next_operation: choice("CLICK", 0.99), next_click_target: choice("e1", 0.99), next_sensitive: noul(0.99), next_satisfied: notYet },
     { operation: choice("BLOCKED", 0.9), sensitive: noul(0), satisfied: notYet }
@@ -672,14 +674,15 @@ await check("a carried action that fails the gate is re-asked, never executed", 
     tabId: 1,
     subgoals: [{ goal: "a", success_criteria: "x" }, { goal: "b", success_criteria: "y" }]
   });
-  eq(client.seen.length, 2, "the second leg decided afresh");
+  eq(client.seen.length, 3, "the second leg decided afresh");
   eq(out.status, "blocked", "and its own answer stands");
-  assert(!browser.calls.some((c) => c.name === "computer"), "the refused carried click never ran");
+  eq(browser.calls.filter((c) => c.name === "computer").length, 1, "only the first leg's click ran; the refused carried click never did");
 });
 
 await check("a next leg already satisfied on arrival finishes without a request", async () => {
-  const browser = fakeBrowser({ rows: [row({ ref: "ref_1", role: "button", name: "Go" })] });
+  const browser = fakeBrowser({ rows: [row({ ref: "ref_1", role: "button", name: "Go" })], onClick: (s) => { s.url = "https://app.test/b"; } });
   const client = fakeClient([
+    { operation: choice("CLICK", 0.95), click_target: choice("e1", 0.95), sensitive: noul(0), satisfied: notYet },
     { operation: choice("DONE", 0.95), sensitive: noul(0), satisfied: noul(0.95),
       next_operation: choice("DONE", 0.95), next_sensitive: noul(0), next_satisfied: noul(0.97) }
   ]);
@@ -688,7 +691,7 @@ await check("a next leg already satisfied on arrival finishes without a request"
     subgoals: [{ goal: "a", success_criteria: "x" }, { goal: "b", success_criteria: "y" }]
   });
   eq(out.status, "done", `reason: ${out.reason}`);
-  eq(client.seen.length, 1, "one request covered both legs");
+  eq(client.seen.length, 2, "the request that finished leg one also finished leg two");
 });
 
 await check("a failing leg stops the run and names itself, and later legs never run", async () => {

@@ -150,9 +150,16 @@ export function targetHead(operation) {
   }
 }
 
-/** Which operations this page can actually support right now. */
-export function availableOperations(rows) {
-  const ops = new Set(["SCROLL_DOWN", "SCROLL_UP", "WAIT", "DONE", "BLOCKED"]);
+/**
+ * Which operations this page can actually support right now.
+ *
+ * `scroll` ({y, height, viewport}, from jev_snapshot) offers a scroll only in a
+ * direction the page can actually move. Without it both are offered, as before.
+ */
+export function availableOperations(rows, scroll = null) {
+  const ops = new Set(["WAIT", "DONE", "BLOCKED"]);
+  if (!scroll || scroll.y + scroll.viewport < scroll.height - 2) ops.add("SCROLL_DOWN");
+  if (!scroll || scroll.y > 0) ops.add("SCROLL_UP");
   for (const r of rows) {
     if (isCompatible("CLICK", r)) ops.add("CLICK");
     if (isCompatible("TYPE_TEXT", r)) {

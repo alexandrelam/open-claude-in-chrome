@@ -73,31 +73,69 @@ export function lexicalScore(row, terms) {
   return hits;
 }
 
+// Off-screen rows only earn a place by matching the goal, and a common goal
+// word can match hundreds of them. Keep the strongest of those, not all.
+export const OFFSCREEN_MATCH_CAP = 60;
+
+/**
+ * Goal words that say nothing about THIS page's rows: the site's own name.
+ * "Search Wikipedia for Nautilus" put "wikipedia" in the terms, and every href
+ * on Wikipedia contains it, so every link on the page counted as a goal match
+ * and the tier meant to narrow the page kept all of it.
+ */
+function withoutSiteTerms(terms, pageUrl) {
+  let host = "";
+  try {
+    host = new URL(pageUrl).hostname.toLowerCase();
+  } catch {
+    return terms;
+  }
+  const out = new Set();
+  for (const t of terms) if (!host.includes(t)) out.add(t);
+  return out;
+}
+
 /**
  * Narrow `rows` to at most `limit`, without asking Jev anything.
  *
- * Three tiers, in order of how confident we are that a row matters:
+ * When rows say whether they are on screen (a jev_snapshot observation), the
+ * action space is what the user can see plus whatever the goal names:
+ *   1. rows matching the goal's own words, anywhere on the page (off-screen
+ *      ones capped at OFFSCREEN_MATCH_CAP, strongest first)
+ *   2. on-screen controls, then other on-screen rows
+ *   everything else off screen is dropped — SCROLL reaches it if it matters
+ * This follows jev-ultrafast, which offers only visible controls. The goal
+ * tier is our addition, so a named target deep in the page is still one
+ * CLICK away rather than a run of scrolls.
+ *
+ * Without on-screen information (the old read_page observation) the tiers are
+ * the original three:
  *   1. rows matching the goal's own words, strongest match first
  *   2. controls, which are what actions are made of
  *   3. everything else, in document order, until the budget runs out
- *   noise is dropped outright and never competes for the budget
+ *
+ * Noise is dropped outright and never competes for the budget.
  *
  * Document order is the tie-breaker rather than a judgement: read_page emits in
  * document order, and actionable page chrome (nav, toolbars, tabs) sits near the
  * top while body prose runs long. Measured: the target was row 21 on the article
- * page and row 4 on the search page. Rows deep in the body are still reachable
- * when they match the goal's words, which is what tier 1 is for.
+ * page and row 4 on the search page.
  *
  * Returns the surviving rows in document order — Jev reads them as a page.
  */
-export function prefilter(rows, { goal, successCriteria, values, limit } = {}) {
-  const terms = termsFrom(goal, successCriteria, ...Object.keys(values || {}), ...Object.values(values || {}));
+export function prefilter(rows, { goal, successCriteria, values, limit, pageUrl } = {}) {
+  const terms = withoutSiteTerms(
+    termsFrom(goal, successCriteria, ...Object.keys(values || {}), ...Object.values(values || {})),
+    pageUrl
+  );
+  const knowsView = rows.some((r) => typeof r.inView === "boolean");
 
   const kept = new Set();
   const matched = [];
   const controls = [];
   const rest = [];
   let noise = 0;
+  let offscreen = 0;
 
   rows.forEach((row, order) => {
     if (isNoise(row)) {
@@ -106,6 +144,7 @@ export function prefilter(rows, { goal, successCriteria, values, limit } = {}) {
     }
     const score = lexicalScore(row, terms);
     if (score > 0) matched.push({ row, score, order });
+    else if (knowsView && !row.inView) offscreen++;
     else if (isControl(row)) controls.push(row);
     else rest.push(row);
   });
@@ -116,8 +155,16 @@ export function prefilter(rows, { goal, successCriteria, values, limit } = {}) {
   // the budget before reaching the card the goal actually named.
   matched.sort((a, b) => b.score - a.score || a.order - b.order);
 
+  let offscreenMatches = 0;
   for (const { row } of matched) {
     if (kept.size >= limit) break;
+    if (knowsView && !row.inView) {
+      if (offscreenMatches >= OFFSCREEN_MATCH_CAP) {
+        offscreen++;
+        continue;
+      }
+      offscreenMatches++;
+    }
     kept.add(row);
   }
   for (const row of controls) {
@@ -133,7 +180,8 @@ export function prefilter(rows, { goal, successCriteria, values, limit } = {}) {
   return {
     rows: out,
     noise,
-    overflow: rows.length - noise - out.length,
+    offscreen,
+    overflow: rows.length - noise - offscreen - out.length,
     signal: matched.length + controls.length,
     matched: matched.length
   };

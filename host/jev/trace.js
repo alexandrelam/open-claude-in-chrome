@@ -49,6 +49,9 @@ function appendSummary(dir, trace) {
     cost_usd: trace.usage?.cost_usd ?? null,
     jev_ms: trace.usage?.jev_ms ?? null,
     browser_ms: trace.usage?.browser_ms ?? null,
+    settle_ms: trace.usage?.settle_ms ?? null,
+    wall_ms: trace.usage?.wall_ms ?? null,
+    input_tokens: trace.usage?.input_tokens ?? null,
     model: trace.usage?.resolved_model ?? null
   };
   fs.appendFileSync(path.join(dir, "summary.jsonl"), JSON.stringify(line) + "\n");

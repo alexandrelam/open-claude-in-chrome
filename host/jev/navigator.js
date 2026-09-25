@@ -392,12 +392,14 @@ async function runSubgoal(callTool, client, cfg, sub, opts, ctx) {
   // domain refusal is a decision, not a failure, so it is never retried.
   const observeNow = async () => {
     const t = Date.now();
+    const settleBefore = ctx.settleMs;
     let r = await observeOrFail(callTool, tabId, cfg);
     for (let attempt = 0; attempt < 2 && r.failure && !r.obs; attempt++) {
-      await new Promise((resolve) => setTimeout(resolve, 400 * (attempt + 1)));
+      await pause(ctx, 400 * (attempt + 1));
       r = await observeOrFail(callTool, tabId, cfg);
     }
-    ctx.browserMs += Date.now() - t;
+    // The retry backoff is settle time, not browser time; count it once.
+    ctx.browserMs += Date.now() - t - (ctx.settleMs - settleBefore);
     return r;
   };
 
@@ -427,7 +429,7 @@ async function runSubgoal(callTool, client, cfg, sub, opts, ctx) {
     }
     ctx.obs = obs;
 
-    let short, request, answers, jevMs, verdict;
+    let short, request, answers, jevMs, verdict, inputTokens;
     try {
       short = await shortlistRows(obs.rows, {
         goal, successCriteria, values, maxRows: cfg.maxRows,
@@ -437,6 +439,7 @@ async function runSubgoal(callTool, client, cfg, sub, opts, ctx) {
       const res = await client.decide(request.state, request.questions);
       answers = res.answers;
       jevMs = res.ms;
+      inputTokens = tokensOf(res.usage);
       ctx.jevMs += jevMs;
     } catch (err) {
       if (err instanceof BudgetExceeded) return { status: "limit_reached", reason: err.message, steps };
@@ -452,7 +455,7 @@ async function runSubgoal(callTool, client, cfg, sub, opts, ctx) {
       satisfied, answers,
       verdict: { ok: verdict.ok, status: verdict.status ?? null, reason: verdict.reason ?? null },
       operation: verdict.operation, target_ref: verdict.row?.ref ?? null,
-      jev_ms: jevMs
+      jev_ms: jevMs, input_tokens: inputTokens
     });
 
     // The success check now governs completion, so it is tested before the
@@ -553,7 +556,7 @@ async function runSubgoal(callTool, client, cfg, sub, opts, ctx) {
 
     let { obs: after, failure: afterFail } = await observeNow();
     for (let settle = 0; settle < 4 && !afterFail && !settled(after); settle++) {
-      await new Promise((resolve) => setTimeout(resolve, 300));
+      await pause(ctx, 300);
       ({ obs: after, failure: afterFail } = await observeNow());
     }
     if (afterFail) {
@@ -597,7 +600,8 @@ export async function navigate(callTool, client, cfg, args) {
     value_keys: Object.keys(values)
   });
 
-  const ctx = { obs: null, deadline: Date.now() + maxMs, decisionNo: 0, actionNo: 0, browserMs: 0, jevMs: 0 };
+  const startedAt = Date.now();
+  const ctx = { obs: null, deadline: startedAt + maxMs, decisionNo: 0, actionNo: 0, browserMs: 0, jevMs: 0, settleMs: 0 };
   const legs = [];
   const allSteps = [];
   let status = "done";
@@ -628,7 +632,9 @@ export async function navigate(callTool, client, cfg, args) {
             interactive: obs.rows.slice(0, 40).map((r, k) => renderRow(r, `e${k + 1}`))
           }
         : null,
-      usage: { ...client.totals, jev_ms: ctx.jevMs, browser_ms: ctx.browserMs },
+      // wall ≈ jev + browser + settle. settle is time spent deliberately
+      // waiting for the page, which neither of the other two counts.
+      usage: { ...client.totals, jev_ms: ctx.jevMs, browser_ms: ctx.browserMs, settle_ms: ctx.settleMs, wall_ms: Date.now() - startedAt },
       run_id: trace.runId
     };
     trace.finish(
@@ -723,6 +729,17 @@ export async function navigate(callTool, client, cfg, args) {
   }
 
   return finish();
+}
+
+/** Wait on purpose, and account for it: these sleeps are invisible otherwise. */
+async function pause(ctx, ms) {
+  const t = Date.now();
+  await new Promise((resolve) => setTimeout(resolve, ms));
+  ctx.settleMs += Date.now() - t;
+}
+
+function tokensOf(usage) {
+  return Number(usage?.input_tokens ?? usage?.prompt_tokens ?? 0) || 0;
 }
 
 async function runCalls(callTool, calls) {

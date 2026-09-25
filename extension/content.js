@@ -375,6 +375,43 @@
     return words.join(" ").slice(0, maxChars);
   }
 
+  // Resolve once the page has had a chance to react to an action: two
+  // animation frames, bounded by timeoutMs. For an editable combobox, wait
+  // instead for its suggestions to become visible (same bound), so the next
+  // decision is not made against a popup that has not opened yet. Ported from
+  // jev-ultrafast's post-input wait.
+  function settleFrames(mode, ref, timeoutMs) {
+    return new Promise((resolve) => {
+      let frames = 0;
+      let done = false;
+      const finish = (reason) => {
+        if (done) return;
+        done = true;
+        resolve(reason);
+      };
+      setTimeout(() => finish("timeout"), timeoutMs);
+      const field = mode === "combobox" && ref ? resolveRef(ref) : null;
+      const optionsVisible = () => {
+        const ids = (field?.getAttribute("aria-controls") || field?.getAttribute("aria-owns") || "")
+          .split(/\s+/)
+          .filter(Boolean);
+        const roots = ids.length ? ids.map((id) => document.getElementById(id)).filter(Boolean) : [document];
+        return roots.some((root) =>
+          [...root.querySelectorAll('[role="option"]')].some((e) => {
+            const r = e.getBoundingClientRect();
+            return r.width && r.height && r.bottom > 0 && r.top < innerHeight && isVisible(e);
+          })
+        );
+      };
+      const tick = () => {
+        if (done) return;
+        if (++frames >= 2 && (mode !== "combobox" || optionsVisible())) finish("settled");
+        else requestAnimationFrame(tick);
+      };
+      requestAnimationFrame(tick);
+    });
+  }
+
   // Everything the Jev loop needs from one observation, in one message:
   // structured rows (no text format to parse), what is on screen, and where
   // the page is scrolled. Replaces read_page + get_page_text + tabs_context.
@@ -741,6 +778,11 @@
       return true;
     }
 
+    if (msg.type === "jevSettle") {
+      settleFrames(msg.mode, msg.ref, msg.timeoutMs || 50).then((result) => sendResponse({ result }));
+      return true;
+    }
+
     if (msg.type === "jevSnapshot") {
       sendResponse({ result: jevSnapshot(msg.options || {}) });
       return true;
@@ -815,6 +857,7 @@
     describePoint,
     generateAccessibilityTree,
     jevSnapshot,
+    settleFrames,
     getPageText,
     findElements,
     setFormValue,

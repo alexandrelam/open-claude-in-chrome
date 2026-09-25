@@ -8,6 +8,7 @@
 
 import {
   observe,
+  hasJevTools,
   observationSignature,
   isToolError,
   resultText
@@ -414,7 +415,7 @@ async function runSubgoal(callTool, client, cfg, sub, opts, ctx) {
     const settleBefore = ctx.settleMs;
     let r = await observeOrFail(callTool, tabId, cfg);
     for (let attempt = 0; attempt < 2 && r.failure && !r.obs; attempt++) {
-      await pause(ctx, 400 * (attempt + 1));
+      await settle(callTool, tabId, ctx, { expect: "wait", timeoutMs: 200 * (attempt + 1) }, 400 * (attempt + 1));
       r = await observeOrFail(callTool, tabId, cfg);
     }
     // The retry backoff is settle time, not browser time; count it once.
@@ -536,14 +537,14 @@ async function runSubgoal(callTool, client, cfg, sub, opts, ctx) {
     // sits in between — so a ref failure re-observes and retries the same
     // operation once against the row that now carries that label.
     const actStart = Date.now();
-    let acted = await runCalls(callTool, planToolCalls(verdict.operation, verdict.row, verdict.value, tabId));
+    let acted = await runCalls(callTool, planToolCalls(verdict.operation, verdict.row, verdict.value, tabId, { jevTools: hasJevTools(callTool) }));
     if (acted.error && /ref_\d+|not found|garbage collected/i.test(acted.error)) {
       const { obs: retryObs } = await observeNow();
       const again = retryObs?.rows.find(
         (r) => r.role === verdict.row.role && r.name === verdict.row.name
       );
       if (again) {
-        acted = await runCalls(callTool, planToolCalls(verdict.operation, again, verdict.value, tabId));
+        acted = await runCalls(callTool, planToolCalls(verdict.operation, again, verdict.value, tabId, { jevTools: hasJevTools(callTool) }));
       }
     }
     ctx.browserMs += Date.now() - actStart;
@@ -590,9 +591,25 @@ async function runSubgoal(callTool, client, cfg, sub, opts, ctx) {
     const settled = (o) =>
       expectsNavigation ? o.url !== beforeUrl : observationSignature(o) !== before;
 
+    // Wait on the event that means the action landed: the URL leaving for a
+    // navigation, the suggestions appearing for a combobox, two frames for
+    // anything else. The fixed 300 ms polls this replaces were most of the
+    // time between one action and the next decision.
+    //
+    // A navigation gets one bounded wait and no polling after it: a submit
+    // that only updates the page in place (an SPA filter) never changes the
+    // URL, and must not cost more than the old 1.2 s poll did. Other actions
+    // get two short re-checks for a page that updates after a fetch.
+    const onCombobox = verdict.operation === "TYPE_TEXT" && (verdict.row?.role || "").toLowerCase() === "combobox";
+    await settle(callTool, tabId, ctx, {
+      expect: expectsNavigation ? "navigation" : onCombobox ? "combobox" : "dom",
+      fromUrl: beforeUrl, ref: verdict.row?.ref, timeoutMs: 2000
+    }, 0);
     let { obs: after, failure: afterFail } = await observeNow();
-    for (let settle = 0; settle < 4 && !afterFail && !settled(after); settle++) {
-      await pause(ctx, 300);
+    const jevTools = hasJevTools(callTool);
+    const rechecks = !jevTools ? 4 : expectsNavigation ? 1 : 2;
+    for (let n = 0; n < rechecks && !afterFail && !settled(after); n++) {
+      await settle(callTool, tabId, ctx, { expect: "wait", timeoutMs: 250 }, 300);
       ({ obs: after, failure: afterFail } = await observeNow());
     }
     if (afterFail) {
@@ -784,6 +801,21 @@ export async function navigate(callTool, client, cfg, args) {
   }
 
   return finish();
+}
+
+/**
+ * Let the page react, through jev_settle when the extension has it, and
+ * otherwise by sleeping `legacyMs` (0 means: nothing to do without it).
+ * Counted as settle time either way.
+ */
+async function settle(callTool, tabId, ctx, args, legacyMs) {
+  if (hasJevTools(callTool)) {
+    const t = Date.now();
+    const res = await callTool("jev_settle", { tabId, ...args });
+    ctx.settleMs += Date.now() - t;
+    if (!isToolError(res)) return;
+  }
+  if (legacyMs > 0) await pause(ctx, legacyMs);
 }
 
 /** Wait on purpose, and account for it: these sleeps are invisible otherwise. */

@@ -425,6 +425,60 @@ await check("an extension without jev_snapshot falls back once, then stops askin
   assert(browser.calls.filter((c) => c.name === "read_page").length >= 2, "then used the old path");
 });
 
+await check("each action waits on its own event, once, without sleeping", async () => {
+  // A button click that changes the page needs two frames, not a 300 ms poll.
+  const browser = fakeBrowser({
+    rows: [
+      row({ ref: "ref_1", role: "button", name: "Open panel" }),
+      row({ ref: "ref_2", role: "link", name: "Next page", href: "https://app.test/next" })
+    ],
+    onClick: (s, args) => {
+      if (args.ref === "ref_1") s.rows = [...s.rows, row({ ref: "ref_3", role: "button", name: "Panel item" })];
+      else s.url = "https://app.test/next";
+    }
+  });
+  const client = fakeClient([
+    { operation: choice("CLICK", 0.95), click_target: choice("e1", 0.95), sensitive: noul(0), satisfied: notYet },
+    { operation: choice("CLICK", 0.95), click_target: choice("e2", 0.95), sensitive: noul(0), satisfied: notYet },
+    { operation: choice("DONE", 0.95), sensitive: noul(0), satisfied: noul(0.95) }
+  ]);
+  const out = await navigate(browser.callTool, client, CFG, { tabId: 1, goal: "g", success_criteria: "s" });
+  eq(out.status, "done", `reason: ${out.reason}`);
+  const settles = browser.calls.filter((c) => c.name === "jev_settle").map((c) => c.args.expect);
+  eq(settles.join(), "dom,navigation", "a frame settle for the button, a URL wait for the link");
+  eq(browser.calls.find((c) => c.name === "jev_settle" && c.args.expect === "navigation").args.fromUrl, "https://app.test/a", "from the page it left");
+  assert(out.usage.settle_ms < 100, `no real sleeping on the happy path: ${out.usage.settle_ms} ms`);
+});
+
+await check("typing into a combobox waits for its suggestions", async () => {
+  const browser = fakeBrowser({
+    rows: [row({ ref: "ref_7", role: "combobox", name: "Tag filter", type: "text" })],
+    onClick: (s, args) => { if (args.value) s.rows = [{ ...s.rows[0], value: args.value }]; }
+  });
+  const client = fakeClient([
+    { operation: choice("TYPE_TEXT", 0.95), text_target: choice("e1", 0.95), value_key: choice("tag", 0.95), sensitive: noul(0), satisfied: notYet },
+    { operation: choice("DONE", 0.95), sensitive: noul(0), satisfied: noul(0.95) }
+  ]);
+  await navigate(browser.callTool, client, CFG, { tabId: 1, goal: "g", success_criteria: "s", values: { tag: "mobile edit" } });
+  const settle = browser.calls.find((c) => c.name === "jev_settle");
+  eq(settle?.args.expect, "combobox", "expect");
+  eq(settle?.args.ref, "ref_7", "for that field");
+});
+
+await check("WAIT is a quarter second, or the old second on an old extension", async () => {
+  for (const legacy of [false, true]) {
+    const browser = fakeBrowser({ rows: [row({ ref: "ref_1", role: "button", name: "Go" })], legacy });
+    const client = fakeClient([
+      { operation: choice("WAIT", 0.95), sensitive: noul(0), satisfied: notYet },
+      { operation: choice("DONE", 0.95), sensitive: noul(0), satisfied: noul(0.95) }
+    ]);
+    await navigate(browser.callTool, client, CFG, { tabId: 1, goal: "g", success_criteria: "s" });
+    const waits = browser.calls.filter((c) => (c.name === "jev_settle" && c.args.expect === "wait") || (c.name === "computer" && c.args.action === "wait"));
+    if (legacy) eq(waits[0]?.name, "computer", "old extension: computer wait");
+    else eq(`${waits[0]?.name}:${waits[0]?.args.timeoutMs}`, "jev_settle:250", "current extension: jev_settle for 250 ms");
+  }
+});
+
 await check("jev_decide returns a short distribution in one id space", async () => {
   // It used to return ~240 entries of almost entirely zero, keyed eN while
   // target_ref was ref_N — so the two halves of the same answer could not be

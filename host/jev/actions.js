@@ -192,7 +192,7 @@ export function looksSensitive(row) {
  * Turn a validated (operation, row, value) into the tool calls that perform it.
  * Returns a list because typing into a rich editor needs two.
  */
-export function planToolCalls(operation, row, value, tabId) {
+export function planToolCalls(operation, row, value, tabId, { jevTools = false } = {}) {
   switch (operation) {
     case "CLICK":
       return [["computer", { action: "left_click", ref: row.ref, tabId }]];
@@ -209,8 +209,8 @@ export function planToolCalls(operation, row, value, tabId) {
       ];
     case "TYPE_AND_SUBMIT":
       return [
-        ...planToolCalls("TYPE_TEXT", row, value, tabId),
-        ...planToolCalls("PRESS_ENTER", row, value, tabId)
+        ...planToolCalls("TYPE_TEXT", row, value, tabId, { jevTools }),
+        ...planToolCalls("PRESS_ENTER", row, value, tabId, { jevTools })
       ];
     case "TYPE_TEXT": {
       // form_input sets the value directly and fires the events a framework
@@ -232,7 +232,11 @@ export function planToolCalls(operation, row, value, tabId) {
         ["computer", { action: "scroll", scroll_direction: "up", scroll_amount: 5, tabId }]
       ];
     case "WAIT":
-      return [["computer", { action: "wait", duration: 1, tabId }]];
+      // A quarter second and then two frames, as jev-ultrafast does, rather
+      // than a flat second. An extension without jev_settle gets the second.
+      return jevTools
+        ? [["jev_settle", { tabId, expect: "wait", timeoutMs: 250 }]]
+        : [["computer", { action: "wait", duration: 1, tabId }]];
     default:
       return [];
   }

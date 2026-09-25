@@ -697,6 +697,35 @@ async function sendContentMessage(tabId, message) {
   }
 }
 
+// Resolve true once the tab's URL differs from fromUrl and the tab is
+// complete, false if that has not happened within timeoutMs.
+async function waitForUrlChange(tabId, fromUrl, timeoutMs) {
+  const landed = (tab) => tab && tab.url !== fromUrl && tab.status === "complete";
+  return new Promise((resolve) => {
+    let finished = false;
+    const listener = (updatedTabId, _info, tab) => {
+      if (updatedTabId === tabId && landed(tab)) done(true);
+    };
+    // Out of time: say whether the URL moved at all, even if the new page is
+    // still loading, so the caller can tell "slow" from "went nowhere".
+    const timer = setTimeout(
+      () => chrome.tabs.get(tabId).then((tab) => done(Boolean(tab && tab.url !== fromUrl)), () => done(false)),
+      timeoutMs
+    );
+    function done(value) {
+      if (finished) return;
+      finished = true;
+      clearTimeout(timer);
+      chrome.tabs.onUpdated.removeListener(listener);
+      resolve(value);
+    }
+    // Listen first, then look: an update between the two would otherwise be
+    // missed and cost the whole timeout.
+    chrome.tabs.onUpdated.addListener(listener);
+    chrome.tabs.get(tabId).then((tab) => landed(tab) && done(true), () => done(false));
+  });
+}
+
 // --- Resolve ref to coordinates ---
 // Resolve a ref to the point to dispatch at, scrolling the element into view
 // first so the point is actually reachable. Returns the full record (not just
@@ -1917,6 +1946,44 @@ const toolHandlers = {
     }
     if (!resp?.result) return { content: [{ type: "text", text: "Error: Could not snapshot the page" }] };
     return { content: [{ type: "text", text: JSON.stringify(resp.result) }] };
+  },
+
+  // Hidden: wait for the page to react to an action, on events rather than a
+  // fixed sleep.
+  //   expect "navigation": until the tab's URL leaves fromUrl and the tab is
+  //     complete (a pushState counts: the tab stays complete and only its URL
+  //     changes), bounded by timeoutMs; then a frame settle on the new page.
+  //   expect "combobox": until the field's suggestions are visible, <=200 ms.
+  //   expect "wait": timeoutMs of plain waiting, then a frame settle.
+  //   anything else: two animation frames, <=50 ms.
+  async jev_settle(args) {
+    const { tabId, expect = "dom", fromUrl, ref } = args;
+    if (!(await isInGroup(tabId))) return { content: [{ type: "text", text: `Error: Tab ${tabId} is not in the MCP group.` }] };
+    const t0 = Date.now();
+    let urlChanged = false;
+    if (expect === "navigation") {
+      urlChanged = await waitForUrlChange(tabId, fromUrl, args.timeoutMs ?? 3000);
+    } else if (expect === "wait") {
+      await sleep(Math.min(args.timeoutMs ?? 250, 5000));
+    }
+    let frames = null;
+    try {
+      const resp = await withTimeout(
+        sendContentMessage(tabId, {
+          type: "jevSettle",
+          mode: expect === "combobox" ? "combobox" : "dom",
+          ref,
+          timeoutMs: expect === "combobox" ? 200 : 50,
+        }),
+        1000,
+        "jev_settle"
+      );
+      frames = resp?.result ?? null;
+    } catch {
+      // A document mid-navigation has no content script to answer. The caller
+      // observes next, and retries that, so a missed frame settle costs nothing.
+    }
+    return { content: [{ type: "text", text: JSON.stringify({ urlChanged, frames, ms: Date.now() - t0 }) }] };
   },
 
   async get_page_text(args) {

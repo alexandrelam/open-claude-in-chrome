@@ -280,6 +280,15 @@ function snapshotRow(r) {
 const snapshotSupport = new WeakMap();
 
 /**
+ * Does this callTool's extension have the hidden Jev tools (jev_snapshot,
+ * jev_settle, jev_act)? They ship together, so the first observation answers
+ * for all three. False until that observation has happened.
+ */
+export function hasJevTools(callTool) {
+  return snapshotSupport.get(callTool) === true;
+}
+
+/**
  * One full observation of a tab.
  *
  * Normally one jev_snapshot call. An extension that predates it gets the old

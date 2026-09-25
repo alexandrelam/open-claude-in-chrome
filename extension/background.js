@@ -1009,9 +1009,29 @@ function effectiveConfig(tabId) {
   return { ...configState.default, ...(configState.byTab[String(tabId)] || {}) };
 }
 
+// Local development hosts are exempt from humanized input.
+//
+// Humanizing exists so automation on a real site looks like a person; there is
+// nobody to convince on localhost, and it is expensive — four humanized `type`
+// calls accounted for 9 of the 13 browser seconds in one audited run. A dev
+// server is also the place where flows get iterated on most.
+function isLocalHost(url) {
+  try {
+    const h = new URL(url).hostname;
+    return h === "localhost" || h === "127.0.0.1" || h === "::1" || h.endsWith(".localhost");
+  } catch {
+    return false;
+  }
+}
+
 async function humanizeOn(tabId) {
   await configHydrated;
-  return !!effectiveConfig(tabId).humanize;
+  if (!effectiveConfig(tabId).humanize) return false;
+  try {
+    const tab = await chrome.tabs.get(tabId);
+    if (tab?.url && isLocalHost(tab.url)) return false;
+  } catch {}
+  return true;
 }
 
 async function writeConfig(key, value, tabId) {
@@ -1536,7 +1556,19 @@ const toolHandlers = {
         }
         return {
           content: [
-            { type: "text", text: `Successfully captured screenshot (${dims}, jpeg) - ID: ${imageId}${saveNote}` },
+            {
+              type: "text",
+              // The image you are shown is rescaled to your client's width,
+              // while clicks are dispatched in the page's own CSS pixels. Read
+              // a coordinate off the picture and it lands somewhere else — in
+              // one audited run the first click opened the wrong menu. Say the
+              // real space, and point at the way that cannot go wrong.
+              text:
+                `Successfully captured screenshot (${dims}, jpeg) - ID: ${imageId}${saveNote}` +
+                (dims
+                  ? `\nCoordinates are in CSS pixels of a ${dims} viewport, NOT in the pixel dimensions of the image as displayed to you — scale accordingly, or avoid the problem entirely by clicking with \`ref\` from read_page/find instead of \`coordinate\`.`
+                  : ""),
+            },
             { type: "image", data: base64, mimeType: "image/jpeg" },
           ],
         };
@@ -1958,8 +1990,22 @@ const toolHandlers = {
                      bytes: (text || "").length });
 
       if (result.exceptionDetails) {
+        // exceptionDetails.text is the bare word "Uncaught". The message and
+        // stack live on .exception.description, and without them a failure
+        // gives the caller nothing to act on — six retries in one audited run
+        // went on rediscovering errors CDP had already reported.
+        const d = result.exceptionDetails;
+        const detail =
+          d.exception?.description ||
+          d.exception?.value ||
+          d.text ||
+          JSON.stringify(d);
+        const where =
+          typeof d.lineNumber === "number"
+            ? ` (line ${d.lineNumber + 1}, column ${(d.columnNumber ?? 0) + 1})`
+            : "";
         return {
-          content: [{ type: "text", text: `Error: ${result.exceptionDetails.text || JSON.stringify(result.exceptionDetails)}` }],
+          content: [{ type: "text", text: `Error: ${detail}${where}` }],
         };
       }
 

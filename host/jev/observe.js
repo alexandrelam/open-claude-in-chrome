@@ -109,6 +109,7 @@ export function parseLine(line) {
     src: attrs.src || "",
     value: attrs.value ?? "",
     type: attrs.type || "",
+    section: attrs.section || "",
     expanded: attrs.expanded,
     checked: attrs.checked,
     selected: attrs.selected,
@@ -151,7 +152,11 @@ export function usableRows(rows) {
   for (const r of rows) {
     if (r.disabled) continue;
     if (!r.role && !r.name && !r.href) continue;
-    const key = `${r.role}|${r.name}|${r.href}|${r.type}|${r.value}`;
+    // The section is part of the identity, not decoration. Without it a form of
+    // repeated cards collapses: seventeen `button "Paragraph"` rows, one per
+    // card, share every other field and sixteen of them were being discarded
+    // here as duplicates.
+    const key = `${r.section}|${r.role}|${r.name}|${r.href}|${r.type}|${r.value}`;
     if (seen.has(key)) continue;
     seen.add(key);
     out.push(r);
@@ -247,14 +252,19 @@ export function parseTabContext(text, tabId) {
 export async function observe(
   callTool,
   tabId,
-  { excerptChars = 300, maxChars = 200_000 } = {}
+  { excerptChars = 300, maxChars = 200_000, depth = 30 } = {}
 ) {
   const [pageRes, textRes, ctxRes] = await Promise.all([
     // read_page truncates at 50k characters by default, which a large article
     // reaches while still well inside Jev's context window — rows would be lost
     // before the shortlister ever sees them, and a row that was never observed
     // cannot be chosen. Read wide and let the token budget do the cutting.
-    callTool("read_page", { tabId, filter: "interactive", max_chars: maxChars }),
+    // depth matters as much as max_chars. generateAccessibilityTree stops at 15
+    // levels unless told otherwise, and a React form nests its controls deeper
+    // than that — on the audited page the section controls sat at depth 20 and
+    // were simply absent from every observation, so Jev was asked to operate a
+    // form it could not see.
+    callTool("read_page", { tabId, filter: "interactive", max_chars: maxChars, depth }),
     callTool("get_page_text", { tabId }),
     callTool("tabs_context_mcp", {})
   ]);

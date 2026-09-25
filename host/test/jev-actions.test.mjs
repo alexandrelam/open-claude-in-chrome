@@ -15,7 +15,7 @@ import {
   OPERATIONS, isCompatible, availableOperations, looksSensitive, planToolCalls, rowLabel
 } from "../jev/actions.js";
 import { resolveConfig, configError, MAX_STEPS_CEILING, MAX_CHOICES } from "../jev/config.js";
-import { splitSections, shortlistRows, estimateTokens, STATE_TOKEN_BUDGET } from "../jev/shortlist.js";
+import { splitSections, shortlistRows, estimateTokens, STATE_TOKEN_BUDGET, renderRow } from "../jev/shortlist.js";
 import { prefilter, isNoise, isControl, termsFrom } from "../jev/relevance.js";
 
 const results = [];
@@ -36,7 +36,7 @@ function eq(a, b, msg) {
   if (a !== b) throw new Error(`${msg}: expected ${JSON.stringify(b)}, got ${JSON.stringify(a)}`);
 }
 
-const row = (o) => ({ ref: "ref_1", role: "", name: "", href: "", value: "", type: "", options: null, indent: 0, ...o });
+const row = (o) => ({ ref: "ref_1", role: "", name: "", section: "", href: "", value: "", type: "", options: null, indent: 0, ...o });
 
 await check("the dangerous tools are absent from the action space entirely", async () => {
   const emitted = new Set();
@@ -222,6 +222,29 @@ await check("controls survive the cap no matter where they sit on the page", asy
   ];
   const out = prefilter(rows, { goal: "find something", successCriteria: "s", values: {}, limit: 50 });
   assert(out.rows.some((r) => r.ref === "ref_deep"), "the searchbox survived");
+});
+
+await check("a card named in the goal is pulled through the cut", async () => {
+  // The prefilter keeps rows matching the goal's own words regardless of where
+  // they sit. With the section on each row, "set Social history to Paragraph"
+  // now reaches the right card's controls even though they are 300 rows down
+  // and their own label is the same "Paragraph" as sixteen others.
+  const rows = [
+    ...Array.from({ length: 300 }, (_, i) =>
+      row({ ref: `ref_${i}`, role: "button", name: "Paragraph", section: `Section ${i}` })
+    ),
+    row({ ref: "ref_target", role: "button", name: "Paragraph", section: "Social history" })
+  ];
+  const out = prefilter(rows, { goal: "set Social history to Paragraph", successCriteria: "s", values: {}, limit: 50 });
+  assert(out.rows.some((r) => r.ref === "ref_target"), "the named card's control survived");
+});
+
+await check("renderRow and rowLabel both name the card", async () => {
+  // Jev chooses between rendered rows, and a human reads rowLabel in the step
+  // log. Seventeen entries reading `button "Paragraph"` are useless in both.
+  const r = row({ ref: "ref_9", role: "button", name: "Paragraph", section: "Chief complaint" });
+  assert(renderRow(r, "e3").includes("Chief complaint"), `renderRow: ${renderRow(r, "e3")}`);
+  assert(rowLabel(r).includes("Chief complaint"), `rowLabel: ${rowLabel(r)}`);
 });
 
 await check("a row matching the goal survives even when buried deep", async () => {

@@ -41,7 +41,7 @@ const CFG = {
   tracesDir: fs.mkdtempSync(path.join(os.tmpdir(), "jev-trace-"))
 };
 
-const row = (o) => ({ ref: "ref_1", role: "", name: "", href: "", value: "", type: "", options: null, indent: 0, ...o });
+const row = (o) => ({ ref: "ref_1", role: "", name: "", section: "", href: "", value: "", type: "", options: null, indent: 0, ...o });
 const choice = (c, conf, probs) => ({ type: "choice", choice: c, confidence: conf, probabilities: probs ?? { [c]: conf } });
 const noul = (p) => ({ type: "noul", noul: p, confidence: Math.abs(p - 0.5) * 2 });
 // Every step now carries a `satisfied` noul in the same request; this is the
@@ -540,6 +540,45 @@ await check("max_steps bounds each subgoal, not the whole call", async () => {
   eq(out.subgoals[0].status, "limit_reached", "first leg hit its own cap");
   eq(out.subgoals[0].steps.length, 2, "two steps in that leg");
   eq(out.subgoals.length, 1, "the run stops at the first leg that does not finish");
+});
+
+await check("final_check catches a setting a later step undid", async () => {
+  // The failure a per-step check structurally cannot see: every leg was true
+  // when it ran, and a later leg quietly reset an earlier one. The audited app
+  // does exactly this — turning on "Split by problem" resets the section style.
+  const browser = fakeBrowser({ rows: [row({ ref: "ref_1", role: "button", name: "Toggle" })] });
+  const client = fakeClient([
+    { operation: choice("CLICK", 0.95), target: choice("e1", 0.95), sensitive: noul(0), satisfied: noul(0.95) },
+    { verified: noul(0.05) }
+  ]);
+  const out = await navigate(browser.callTool, client, CFG, {
+    tabId: 1, goal: "set the style", success_criteria: "the style is Paragraph",
+    final_check: "every section still has the style it was given"
+  });
+  eq(out.status, "needs_help", "the run must not report done");
+  assert(out.reason.includes("final check"), `reason: ${out.reason}`);
+  assert(out.reason.includes("undone"), "and it should say what probably happened");
+});
+
+await check("final_check holding leaves the run done, and costs one request", async () => {
+  const browser = fakeBrowser({ rows: [row({ ref: "ref_1", role: "button", name: "Toggle" })] });
+  const client = fakeClient([
+    { operation: choice("CLICK", 0.95), target: choice("e1", 0.95), sensitive: noul(0), satisfied: noul(0.95) },
+    { verified: noul(0.96) }
+  ]);
+  const out = await navigate(browser.callTool, client, CFG, {
+    tabId: 1, goal: "g", success_criteria: "s", final_check: "everything is in place"
+  });
+  eq(out.status, "done", `reason: ${out.reason}`);
+  eq(client.seen.length, 2, "the step, plus one verification");
+});
+
+await check("no final_check means no extra request", async () => {
+  const browser = fakeBrowser({ rows: [row({ ref: "ref_1", role: "button", name: "Toggle" })] });
+  const client = fakeClient([{ operation: choice("CLICK", 0.95), target: choice("e1", 0.95), sensitive: noul(0), satisfied: noul(0.95) }]);
+  const out = await navigate(browser.callTool, client, CFG, { tabId: 1, goal: "g", success_criteria: "s" });
+  eq(out.status, "done", "status");
+  eq(client.seen.length, 1, "opt-in, so nothing extra is spent");
 });
 
 await check("usage splits Jev time from browser time", async () => {

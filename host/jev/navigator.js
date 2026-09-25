@@ -586,6 +586,8 @@ export async function navigate(callTool, client, cfg, args) {
     }
   }
 
+  const finalCheck = args.final_check ?? args.finalCheck ?? null;
+
   for (const [idx, sub] of subgoals.entries()) {
     const leg = await runSubgoal(
       callTool, client, runCfg, sub,
@@ -603,6 +605,56 @@ export async function navigate(callTool, client, cfg, args) {
         reason = `Subgoal ${idx + 1} of ${subgoals.length} ("${sub.goal}") stopped: ${leg.reason}`;
       }
       break;
+    }
+  }
+
+  // Every leg reported done — but a per-leg check only ever asked "is THIS leg
+  // finished", on the page as it stood at the time. It cannot notice a setting
+  // from leg 2 being silently reset by leg 7, which is exactly what the audited
+  // app does: turning on "Split by problem" resets the section style a previous
+  // leg had just set. One question against the whole intended end state is the
+  // only thing that catches it.
+  if (status === "done" && finalCheck) {
+    const { obs: finalObs } = await (async () => {
+      const t = Date.now();
+      const r = await observeOrFail(callTool, tabId, runCfg);
+      ctx.browserMs += Date.now() - t;
+      return r;
+    })();
+    if (finalObs) ctx.obs = finalObs;
+    try {
+      const t = Date.now();
+      const { answers } = await client.decide(
+        {
+          intended_end_state: finalCheck,
+          url: ctx.obs?.url,
+          title: ctx.obs?.title,
+          page_excerpt: ctx.obs?.excerpt,
+          elements: (ctx.obs?.rows ?? [])
+            .slice(0, runCfg.maxRows)
+            .map((r, k) => renderRow(r, `e${k + 1}`))
+        },
+        {
+          verified: {
+            type: "noul",
+            instructions: `Is ALL of this true of the page right now: ${finalCheck}`,
+            criteria: {
+              true: "Every part of the intended end state is visibly in place",
+              false: "Some part of it is missing, or was undone"
+            }
+          }
+        }
+      );
+      ctx.jevMs += Date.now() - t;
+      const p = answers.verified?.noul ?? 0;
+      trace.step({ i: ++ctx.decisionNo, final_check: finalCheck, verified: p, url: ctx.obs?.url });
+      if (p <= 0.5) {
+        status = "needs_help";
+        reason = `Every subgoal finished, but the final check did not hold (p=${p.toFixed(2)}): ${finalCheck}. Something set earlier was probably undone by a later step — inspect the page before treating this as done.`;
+      }
+    } catch (err) {
+      status = "needs_help";
+      reason = `Every subgoal finished, but the final check could not be run: ${err?.message ?? err}`;
     }
   }
 

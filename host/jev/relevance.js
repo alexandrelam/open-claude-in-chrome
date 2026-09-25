@@ -44,7 +44,7 @@ export function termsFrom(...sources) {
  */
 export function isNoise(row) {
   const name = (row.name || "").trim();
-  if (!name && !row.href && !row.type) return true;
+  if (!name && !row.href && !row.type && !row.section) return true;
   if (/^\[?\d{1,4}\]?$/.test(name)) return true; // [1], [12], 3
   if (/^\[(edit|citation needed|note \d+)\]$/i.test(name)) return true;
   return false;
@@ -64,7 +64,10 @@ export function isControl(row) {
 
 export function lexicalScore(row, terms) {
   if (!terms.size) return 0;
-  const hay = `${row.name || ""} ${row.href || ""} ${row.role || ""}`.toLowerCase();
+  // The section is included so a goal naming a card ("set Social history to
+  // Paragraph") pulls that card's controls into the always-keep tier, wherever
+  // they sit in document order.
+  const hay = `${row.name || ""} ${row.section || ""} ${row.href || ""} ${row.role || ""}`.toLowerCase();
   let hits = 0;
   for (const t of terms) if (hay.includes(t)) hits++;
   return hits;
@@ -74,9 +77,10 @@ export function lexicalScore(row, terms) {
  * Narrow `rows` to at most `limit`, without asking Jev anything.
  *
  * Three tiers, in order of how confident we are that a row matters:
- *   1. controls and anything matching the goal's own words — always kept
- *   2. everything else, in document order, until the budget runs out
- *   3. noise, dropped outright
+ *   1. rows matching the goal's own words, strongest match first
+ *   2. controls, which are what actions are made of
+ *   3. everything else, in document order, until the budget runs out
+ *   noise is dropped outright and never competes for the budget
  *
  * Document order is the tie-breaker rather than a judgement: read_page emits in
  * document order, and actionable page chrome (nav, toolbars, tabs) sits near the
@@ -90,20 +94,33 @@ export function prefilter(rows, { goal, successCriteria, values, limit } = {}) {
   const terms = termsFrom(goal, successCriteria, ...Object.keys(values || {}), ...Object.values(values || {}));
 
   const kept = new Set();
-  const signal = [];
+  const matched = [];
+  const controls = [];
   const rest = [];
   let noise = 0;
 
-  for (const row of rows) {
+  rows.forEach((row, order) => {
     if (isNoise(row)) {
       noise++;
-      continue;
+      return;
     }
-    if (isControl(row) || lexicalScore(row, terms) > 0) signal.push(row);
+    const score = lexicalScore(row, terms);
+    if (score > 0) matched.push({ row, score, order });
+    else if (isControl(row)) controls.push(row);
     else rest.push(row);
-  }
+  });
 
-  for (const row of signal) {
+  // Goal matches outrank plain controls, and a stronger match outranks a weaker
+  // one. On a page that is ALL controls — a form of repeated cards is exactly
+  // that — treating "is a control" as the top tier means document order fills
+  // the budget before reaching the card the goal actually named.
+  matched.sort((a, b) => b.score - a.score || a.order - b.order);
+
+  for (const { row } of matched) {
+    if (kept.size >= limit) break;
+    kept.add(row);
+  }
+  for (const row of controls) {
     if (kept.size >= limit) break;
     kept.add(row);
   }
@@ -117,6 +134,7 @@ export function prefilter(rows, { goal, successCriteria, values, limit } = {}) {
     rows: out,
     noise,
     overflow: rows.length - noise - out.length,
-    signal: signal.length
+    signal: matched.length + controls.length,
+    matched: matched.length
   };
 }

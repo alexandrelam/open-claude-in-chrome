@@ -158,6 +158,59 @@
   }
 
   // --- Accessibility tree generation ---
+
+  // Elements that group a page into named parts. A repeated-card form is the
+  // case that matters: seventeen cards each offering a "Paragraph" button is
+  // seventeen rows that are identical unless we say which card they came from.
+  const REGION_TAGS = new Set([
+    "section", "article", "nav", "aside", "form", "fieldset", "main",
+    "header", "footer", "dialog", "details", "table", "li",
+  ]);
+  const REGION_ROLES = new Set([
+    "region", "group", "form", "dialog", "tabpanel", "listitem", "row",
+    "article", "navigation", "complementary", "search", "radiogroup",
+  ]);
+
+  // The name of the part `el` introduces, or null if it introduces none.
+  function regionNameFor(el) {
+    const tag = el.tagName.toLowerCase();
+    const role = (el.getAttribute("role") || "").toLowerCase();
+    if (!REGION_TAGS.has(tag) && !REGION_ROLES.has(role)) return null;
+
+    // aria-label / aria-labelledby first, which is how a well-built card names
+    // itself; then the heading or legend a card usually leads with.
+    let name = "";
+    const aria = el.getAttribute("aria-label");
+    if (aria) name = aria.trim();
+    if (!name && el.getAttribute("aria-labelledby")) {
+      name = el
+        .getAttribute("aria-labelledby")
+        .split(/\s+/)
+        .map((id) => document.getElementById(id)?.textContent?.trim())
+        .filter(Boolean)
+        .join(" ");
+    }
+    if (!name) {
+      const heading = el.querySelector("h1, h2, h3, h4, h5, h6, legend, summary, caption");
+      // Only a heading that belongs to THIS region, not one from a nested card.
+      if (heading && heading.closest(REGION_TAGS_SELECTOR) === el) {
+        name = heading.textContent.trim();
+      }
+    }
+    if (!name) return null;
+    return name.replace(/\s+/g, " ").slice(0, 60);
+  }
+  const REGION_TAGS_SELECTOR = [...REGION_TAGS].join(",") +
+    ",[role=region],[role=group],[role=form],[role=dialog],[role=tabpanel],[role=listitem],[role=row]";
+
+  // An element the page has explicitly removed from the accessibility tree.
+  // Offering these is worse than useless: they are exactly the controls sitting
+  // underneath an open panel, and clicking one does nothing while looking like
+  // a legitimate action that simply had no effect.
+  function isHiddenFromA11y(el) {
+    return Boolean(el.closest('[aria-hidden="true"], [inert]'));
+  }
+
   function generateAccessibilityTree(options = {}) {
     const filter = options.filter || "all";
     const maxDepth = options.depth || 15;
@@ -181,7 +234,7 @@
       return true;
     }
 
-    function walk(el, depth, indent) {
+    function walk(el, depth, indent, landmark) {
       if (truncated) return;
       if (depth > maxDepth) return;
       if (!el || el.nodeType !== 1) return;
@@ -189,6 +242,7 @@
       const tag = el.tagName.toLowerCase();
       // Skip invisible, script, style, svg internals
       if (["script", "style", "noscript", "template"].includes(tag)) return;
+      if (isHiddenFromA11y(el)) return;
 
       const role = getRole(el);
       const name = getAccessibleName(el);
@@ -218,8 +272,13 @@
         if (tag === "input") line += ` type="${el.type || "text"}"`;
         if (el.getAttribute("aria-expanded")) line += ` expanded=${el.getAttribute("aria-expanded")}`;
         if (el.getAttribute("aria-checked")) line += ` checked=${el.getAttribute("aria-checked")}`;
+        else if (tag === "input" && (el.type === "checkbox" || el.type === "radio")) line += ` checked=${el.checked}`;
         if (el.getAttribute("aria-selected")) line += ` selected=${el.getAttribute("aria-selected")}`;
         if (el.disabled) line += " disabled";
+        // Which part of the page this control belongs to. Without it a form of
+        // repeated cards is an undifferentiated list in which the same label
+        // appears once per card and none of them can be told apart.
+        if (landmark && landmark !== name) line += ` section="${landmark}"`;
 
         // Select options
         if (tag === "select") {
@@ -234,13 +293,16 @@
 
       // Recurse children (including shadow DOM)
       const nextIndent = shouldShow && visible ? indent + "  " : indent;
+      // The nearest named region wins, so a control reports the card it is in
+      // rather than the outermost <main> that contains everything.
+      const nextLandmark = regionNameFor(el) || landmark;
       if (el.shadowRoot) {
         for (const child of el.shadowRoot.children) {
-          walk(child, depth + 1, nextIndent);
+          walk(child, depth + 1, nextIndent, nextLandmark);
         }
       }
       for (const child of el.children) {
-        walk(child, depth + 1, nextIndent);
+        walk(child, depth + 1, nextIndent, nextLandmark);
       }
     }
 
@@ -249,9 +311,16 @@
       const el = resolveRef(startRefId);
       if (el) root = el;
       else return `Error: ref_id "${startRefId}" not found or element was garbage collected.`;
+    } else {
+      // A modal dialog means everything behind it is unreachable — that is what
+      // aria-modal asserts. Reporting the covered page as though it were
+      // actionable is how an agent ends up clicking a button under a panel and
+      // reading the no-op as "the page didn't change".
+      const modal = document.querySelector('[role="dialog"][aria-modal="true"], dialog[open]');
+      if (modal && isVisible(modal)) root = modal;
     }
 
-    walk(root, 0, "");
+    walk(root, 0, "", root === document.body ? null : regionNameFor(root));
     return output;
   }
 

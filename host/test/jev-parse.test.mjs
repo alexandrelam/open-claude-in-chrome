@@ -117,6 +117,36 @@ check("select options carry commas and quotes", () => {
   eq(r.options[1].selected, false, "second is not selected");
 });
 
+check("the owning section parses as an ordinary attribute", () => {
+  // Added to read_page for repeated-card forms. It needed no parser change:
+  // parseAttrs already scans quoted key="value" pairs generically.
+  const r = parseLine('button "Paragraph" [ref_88] section="Chief complaint"');
+  eq(r.section, "Chief complaint", "section");
+  eq(r.name, "Paragraph", "name");
+  eq(r.ref, "ref_88", "ref");
+  eq(parseLine('link "Home" [ref_1]').section, "", "absent section is empty, not undefined");
+});
+
+check("seventeen same-named buttons survive when their sections differ", () => {
+  // The bug this pins. A repeated-card form offers one "Paragraph" button per
+  // card; they share role, name, href, type and value, so the dedup collapsed
+  // all seventeen into one and sixteen cards became unreachable — AFTER a depth
+  // fix had finally made them visible.
+  const rows = [];
+  for (const section of ["Chief complaint", "HPI", "Social history"]) {
+    rows.push({ ref: `ref_${rows.length}`, role: "button", name: "Paragraph", section, href: "", type: "", value: "", options: null, indent: 4 });
+  }
+  eq(usableRows(rows).length, 3, "one per card");
+  eq(new Set(usableRows(rows).map((r) => r.section)).size, 3, "and they are the right three");
+});
+
+check("rows that are genuinely identical are still collapsed", () => {
+  // The dedup still earns its place: indistinguishable options split
+  // probability mass and depress confidence below the gate for no reason.
+  const same = { role: "button", name: "Paragraph", section: "HPI", href: "", type: "", value: "", options: null, indent: 4 };
+  eq(usableRows([{ ...same, ref: "ref_1" }, { ...same, ref: "ref_2" }]).length, 1, "collapsed");
+});
+
 check("non-element lines are skipped, not guessed at", () => {
   assert(parseLine("") === null, "empty line");
   assert(parseLine("   ") === null, "whitespace line");

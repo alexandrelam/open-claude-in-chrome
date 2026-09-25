@@ -12,6 +12,10 @@
 // advertised and fail individually with an actionable message when there is no
 // API key. A missing key must never stop the browser tools from working.
 
+import fs from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 
@@ -68,6 +72,32 @@ const server = new McpServer({
   };
 }
 
+// Warn when the running process is older than the code on disk.
+//
+// MCP servers are long-lived, and the tool schema is sent once at connect time.
+// An audited run silently lacked the `subgoals` parameter for half an hour
+// because the server had started before it was written — the code was on disk,
+// the client just never saw it, and nothing said so. A file newer than this
+// process means the schema in the client's hands is stale.
+const STARTED_AT = Date.now();
+const WATCHED = path.join(path.dirname(fileURLToPath(import.meta.url)), "jev");
+
+function stalenessWarning() {
+  try {
+    let newest = 0;
+    for (const name of fs.readdirSync(WATCHED)) {
+      if (!name.endsWith(".js")) continue;
+      newest = Math.max(newest, fs.statSync(path.join(WATCHED, name)).mtimeMs);
+    }
+    const self = fs.statSync(fileURLToPath(import.meta.url)).mtimeMs;
+    newest = Math.max(newest, self);
+    if (newest > STARTED_AT) {
+      return `NOTE: this server started ${new Date(STARTED_AT).toISOString()} but host/jev was modified since. The tool definitions you were given may be out of date — restart the MCP server (./refresh-mcp.sh, then /mcp) to pick up new parameters.\n\n`;
+    }
+  } catch {}
+  return "";
+}
+
 function errorResult(text) {
   return { content: [{ type: "text", text }], isError: true };
 }
@@ -77,7 +107,7 @@ function errorResult(text) {
 // reads, so it has to stand alone.
 function jsonResult(value) {
   return {
-    content: [{ type: "text", text: JSON.stringify(value, null, 2) }],
+    content: [{ type: "text", text: stalenessWarning() + JSON.stringify(value, null, 2) }],
     structuredContent: value
   };
 }

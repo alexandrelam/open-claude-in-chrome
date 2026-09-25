@@ -192,5 +192,8 @@ export function planToolCalls(operation, row, value, tabId) {
 export function rowLabel(row) {
   if (!row) return "";
   const base = [row.role, row.name && `"${row.name}"`].filter(Boolean).join(" ");
-  return base || row.href || row.ref;
+  // Name the card in step logs and escalation reasons. "CLICK on button
+  // \"Paragraph\"" is unreadable when the page offers seventeen of them.
+  const located = base && row.section ? `${base} in ${row.section}` : base;
+  return located || row.href || row.ref;
 }

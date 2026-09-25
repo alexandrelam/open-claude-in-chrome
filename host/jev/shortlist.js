@@ -27,10 +27,17 @@ export function estimateTokens(value) {
 export function renderRow(row, id) {
   const bits = [id, row.role || "element"];
   if (row.name) bits.push(row.name);
+  // The owning section goes in the main run of fields, not the trailing extras:
+  // on a repeated-card form it is the only thing distinguishing one row from
+  // sixteen others, so it has to be as prominent as the label itself.
+  if (row.section) bits.push(`in ${row.section}`);
   const line = bits.join(" | ");
   const extra = [];
   if (row.value) extra.push(`value="${row.value}"`);
   if (row.type) extra.push(`type=${row.type}`);
+  for (const key of ["checked", "expanded", "selected"]) {
+    if (row[key] !== undefined && row[key] !== "") extra.push(`${key}=${row[key]}`);
+  }
   if (row.options?.length)
     extra.push(`options=${row.options.slice(0, 8).map((o) => o.label).join("/")}`);
   return extra.length ? `${line} | ${extra.join(" ")}` : line;

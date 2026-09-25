@@ -48,6 +48,12 @@ export const JEV_TOOLS = [
         .string()
         .optional()
         .describe("Navigate here before the first step. The loop itself can never navigate."),
+      final_check: z
+        .string()
+        .optional()
+        .describe(
+          "One sentence describing the WHOLE intended end state, checked once after every subgoal has finished. Worth setting whenever later steps can undo earlier ones — some forms reset a section's style when a toggle changes, and a per-step check cannot see that because it only ever asks whether the current step is done. Costs one extra request."
+        ),
       max_steps: z.number().optional().describe("Maximum browser actions per subgoal (default 20, hard cap 50)."),
       max_ms: z.number().optional().describe("Wall-clock budget in milliseconds for the whole call, across every subgoal (default 60000)."),
       min_confidence: z

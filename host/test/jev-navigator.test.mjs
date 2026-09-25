@@ -52,7 +52,7 @@ const notYet = noul(0.02);
 
 await check("validate passes a confident, compatible, harmless action", async () => {
   const map = new Map([["e1", row({ ref: "ref_3", role: "button", name: "Search" })]]);
-  const v = validate({ operation: choice("CLICK", 0.9), target: choice("e1", 0.85), sensitive: noul(0.02), satisfied: notYet }, map, CFG, { allowSensitive: false, values: {} });
+  const v = validate({ operation: choice("CLICK", 0.9), click_target: choice("e1", 0.85), sensitive: noul(0.02), satisfied: notYet }, map, CFG, { allowSensitive: false, values: {} });
   assert(v.ok, `should pass: ${v.reason}`);
   eq(v.row.ref, "ref_3", "resolved to the real ref");
 });
@@ -61,14 +61,14 @@ await check("validate rejects a ref Jev was never offered", async () => {
   // The whole containment argument rests on this: eN is a key into a set we
   // just built, so anything else is not a stale ref, it is not a ref at all.
   const map = new Map([["e1", row({ role: "button", name: "Search" })]]);
-  const v = validate({ operation: choice("CLICK", 0.9), target: choice("e99", 0.9), sensitive: noul(0), satisfied: notYet }, map, CFG, { allowSensitive: false, values: {} });
+  const v = validate({ operation: choice("CLICK", 0.9), click_target: choice("e99", 0.9), sensitive: noul(0), satisfied: notYet }, map, CFG, { allowSensitive: false, values: {} });
   eq(v.status, "needs_help", "status");
   assert(v.reason.includes("e99"), "names what it rejected");
 });
 
 await check("validate rejects an operation the element cannot take", async () => {
   const map = new Map([["e1", row({ role: "link", name: "Docs", href: "https://x.test" })]]);
-  const v = validate({ operation: choice("TYPE_TEXT", 0.95), target: choice("e1", 0.95), sensitive: noul(0), value_key: choice("q", 1) }, map, CFG, { allowSensitive: false, values: { q: "hi" } });
+  const v = validate({ operation: choice("TYPE_TEXT", 0.95), text_target: choice("e1", 0.95), sensitive: noul(0), value_key: choice("q", 1) }, map, CFG, { allowSensitive: false, values: { q: "hi" } });
   eq(v.status, "needs_help", "status");
   assert(v.reason.includes("TYPE_TEXT"), "names the operation");
 });
@@ -83,7 +83,7 @@ await check("confidence is the weaker of operation and target, not the operation
   ]);
   const answers = {
     operation: choice("CLICK", 0.99),
-    target: { type: "choice", choice: "e1", confidence: 0.3, probabilities: { e1: 0.3, e2: 0.7 } },
+    click_target: { type: "choice", choice: "e1", confidence: 0.3, probabilities: { e1: 0.3, e2: 0.7 } },
     sensitive: noul(0), satisfied: notYet
   };
   const v = validate(answers, map, CFG, { allowSensitive: false, values: {} });
@@ -91,39 +91,36 @@ await check("confidence is the weaker of operation and target, not the operation
   assert(v.reason.includes("0.30"), `reports the combined figure: ${v.reason}`);
 });
 
-await check("an operation and target that disagree do not renormalize into confidence", async () => {
-  // Nearly all the mass is on rows PRESS_ENTER cannot touch. Dividing that away
-  // would report 1.0 for a pair of answers that plainly disagree about the page.
-  const map = new Map([
-    ["e1", row({ ref: "ref_1", role: "searchbox", name: "Search", type: "search" })],
-    ["e2", row({ ref: "ref_2", role: "link", name: "Home", href: "https://x.test" })],
-    ["e3", row({ ref: "ref_3", role: "link", name: "About", href: "https://x.test/a" })]
-  ]);
-  const answers = {
-    operation: choice("PRESS_ENTER", 0.9),
-    target: { type: "choice", choice: "e1", confidence: 0.05, probabilities: { e1: 0.05, e2: 0.5, e3: 0.45 } },
-    sensitive: noul(0), satisfied: notYet
-  };
-  const v = validate(answers, map, CFG, { allowSensitive: false, values: {} });
-  eq(v.status, "needs_help", "incoherent pair must still escalate");
+await check("a head only offers targets its operation can act on", async () => {
+  // Real case from Wikipedia: PRESS_ENTER split 0.58 on the search field and
+  // 0.41 on the Search button, which PRESS_ENTER cannot act on. Now the button
+  // is not an option in the text head at all, so it cannot absorb any mass.
+  const rows = [
+    row({ ref: "ref_4", role: "searchbox", name: "Search", type: "search" }),
+    row({ ref: "ref_5", role: "button", name: "Search" }),
+    row({ ref: "ref_6", role: "link", name: "Home", href: "https://x.test" })
+  ];
+  const { questions } = buildRequest({ url: "", title: "", excerpt: "", rows }, rows, { goal: "g", successCriteria: "s", values: {} });
+  eq(Object.keys(questions.text_target.criteria).join(), "e1", "only the field can be typed into");
+  assert(questions.click_target.criteria.e2 && questions.click_target.criteria.e3, "button and link are clickable");
+  assert(!questions.select_target, "no head without a legal option");
 });
 
-await check("target confidence is scored only against legal targets", async () => {
-  // Real case from Wikipedia: PRESS_ENTER split 0.58 on the search field and
-  // 0.41 on the Search button. The button is not a legal PRESS_ENTER target, so
-  // counting its mass as doubt escalated a run that was going perfectly.
+await check("validate reads the head that belongs to the chosen operation", async () => {
   const map = new Map([
     ["e1", row({ ref: "ref_4", role: "searchbox", name: "Search", type: "search" })],
     ["e2", row({ ref: "ref_5", role: "button", name: "Search" })]
   ]);
   const answers = {
-    operation: choice("PRESS_ENTER", 0.78),
-    target: { type: "choice", choice: "e1", confidence: 0.56, probabilities: { e1: 0.58, e2: 0.41, e3: 0.01 } },
+    operation: choice("PRESS_ENTER", 0.9),
+    click_target: choice("e2", 0.97),
+    text_target: { type: "choice", choice: "e1", confidence: 0.95, probabilities: { e1: 0.97 } },
     sensitive: noul(0.02)
   };
   const v = validate(answers, map, CFG, { allowSensitive: false, values: {} });
-  assert(v.ok, `should pass once conditioned on the operation: ${v.reason}`);
-  assert(v.confidence > 0.75, `expected ~0.78, got ${v.confidence}`);
+  assert(v.ok, `should pass: ${v.reason}`);
+  eq(v.row.ref, "ref_4", "the text head's field, not the click head's button");
+  assert(v.confidence > 0.85, `confidence: ${v.confidence}`);
 });
 
 await check("splitting between two genuinely legal targets still counts as doubt", async () => {
@@ -135,7 +132,7 @@ await check("splitting between two genuinely legal targets still counts as doubt
   ]);
   const answers = {
     operation: choice("CLICK", 0.95),
-    target: { type: "choice", choice: "e1", confidence: 0.52, probabilities: { e1: 0.52, e2: 0.48 } },
+    click_target: { type: "choice", choice: "e1", confidence: 0.52, probabilities: { e1: 0.52, e2: 0.48 } },
     sensitive: noul(0.02)
   };
   const v = validate(answers, map, CFG, { allowSensitive: false, values: {} });
@@ -144,27 +141,27 @@ await check("splitting between two genuinely legal targets still counts as doubt
 
 await check("a sensitive label is refused even when the model calls it safe", async () => {
   const map = new Map([["e1", row({ role: "button", name: "Delete account" })]]);
-  const v = validate({ operation: choice("CLICK", 0.95), target: choice("e1", 0.95), sensitive: noul(0.01), satisfied: notYet }, map, CFG, { allowSensitive: false, values: {} });
+  const v = validate({ operation: choice("CLICK", 0.95), click_target: choice("e1", 0.95), sensitive: noul(0.01), satisfied: notYet }, map, CFG, { allowSensitive: false, values: {} });
   eq(v.status, "needs_help", "status");
   assert(v.reason.includes("sensitive keyword"), "says which gate tripped");
 });
 
 await check("a sensitive model answer is refused even when the label looks innocent", async () => {
   const map = new Map([["e1", row({ role: "button", name: "Proceed" })]]);
-  const v = validate({ operation: choice("CLICK", 0.95), target: choice("e1", 0.95), sensitive: noul(0.9), satisfied: notYet }, map, CFG, { allowSensitive: false, values: {} });
+  const v = validate({ operation: choice("CLICK", 0.95), click_target: choice("e1", 0.95), sensitive: noul(0.9), satisfied: notYet }, map, CFG, { allowSensitive: false, values: {} });
   eq(v.status, "needs_help", "status");
 });
 
 await check("allow_sensitive lets a deliberate destructive action through", async () => {
   const map = new Map([["e1", row({ role: "button", name: "Delete account" })]]);
-  const v = validate({ operation: choice("CLICK", 0.95), target: choice("e1", 0.95), sensitive: noul(0.9), satisfied: notYet }, map, CFG, { allowSensitive: true, values: {} });
+  const v = validate({ operation: choice("CLICK", 0.95), click_target: choice("e1", 0.95), sensitive: noul(0.9), satisfied: notYet }, map, CFG, { allowSensitive: true, values: {} });
   assert(v.ok, `should pass when explicitly allowed: ${v.reason}`);
   eq(v.sensitive, true, "still flagged for the trace");
 });
 
 await check("needs_value names the field, so Claude knows what to supply", async () => {
   const map = new Map([["e1", row({ role: "textbox", name: "Coupon code", type: "text" })]]);
-  const v = validate({ operation: choice("TYPE_TEXT", 0.95), target: choice("e1", 0.95), sensitive: noul(0), value_key: choice("NONE", 0.9) }, map, CFG, { allowSensitive: false, values: { other: "x" } });
+  const v = validate({ operation: choice("TYPE_TEXT", 0.95), text_target: choice("e1", 0.95), sensitive: noul(0), value_key: choice("NONE", 0.9) }, map, CFG, { allowSensitive: false, values: { other: "x" } });
   eq(v.status, "needs_value", "status");
   assert(v.reason.includes("Coupon code"), "names the field");
   assert(v.reason.includes("textbox"), "names the role");
@@ -189,7 +186,7 @@ await check("buildRequest omits the target question when there is nothing to tar
   // A Choice with no options is a malformed request; on an empty page the only
   // sensible answers are the targetless ones anyway.
   const { questions } = buildRequest({ url: "", title: "", excerpt: "", rows: [] }, [], { goal: "g", successCriteria: "s", values: {} });
-  assert(!questions.target, "no target question");
+  assert(!questions.click_target && !questions.text_target && !questions.select_target, "no target question");
   assert(questions.operation && questions.sensitive, "the rest still asked");
 });
 
@@ -250,7 +247,7 @@ await check("a click then a confirmed DONE returns done with the steps taken", a
     onClick: (s) => { s.url = "https://app.test/inv/9"; s.title = "Invoice 9"; s.rows = [row({ ref: "ref_1", role: "button", name: "Download" })]; }
   });
   const client = fakeClient([
-    { operation: choice("CLICK", 0.95), target: choice("e1", 0.95), sensitive: noul(0.01), satisfied: notYet },
+    { operation: choice("CLICK", 0.95), click_target: choice("e1", 0.95), sensitive: noul(0.01), satisfied: notYet },
     { operation: choice("DONE", 0.95), sensitive: noul(0.01) },
     { satisfied: noul(0.95) }
   ]);
@@ -279,7 +276,7 @@ await check("the sensitive gate stops BEFORE the browser is touched", async () =
   // The important assertion is not the status, it is that no computer or
   // form_input call was ever made.
   const browser = fakeBrowser({ rows: [row({ ref: "ref_1", role: "button", name: "Delete everything" })] });
-  const client = fakeClient([{ operation: choice("CLICK", 0.99), target: choice("e1", 0.99), sensitive: noul(0.99), satisfied: notYet }]);
+  const client = fakeClient([{ operation: choice("CLICK", 0.99), click_target: choice("e1", 0.99), sensitive: noul(0.99), satisfied: notYet }]);
   const out = await navigate(browser.callTool, client, CFG, { tabId: 1, goal: "clean up", success_criteria: "done" });
   eq(out.status, "needs_help", "status");
   assert(!browser.calls.some((c) => c.name === "computer" || c.name === "form_input"), "an action was performed despite the gate");
@@ -287,7 +284,7 @@ await check("the sensitive gate stops BEFORE the browser is touched", async () =
 
 await check("needs_value stops without acting and says what is missing", async () => {
   const browser = fakeBrowser({ rows: [row({ ref: "ref_1", role: "textbox", name: "Search", type: "search" })] });
-  const client = fakeClient([{ operation: choice("TYPE_TEXT", 0.95), target: choice("e1", 0.95), sensitive: noul(0), value_key: choice("NONE", 0.9) }]);
+  const client = fakeClient([{ operation: choice("TYPE_TEXT", 0.95), text_target: choice("e1", 0.95), sensitive: noul(0), value_key: choice("NONE", 0.9) }]);
   const out = await navigate(browser.callTool, client, CFG, { tabId: 1, goal: "search", success_criteria: "results", values: { unrelated: "x" } });
   eq(out.status, "needs_value", "status");
   assert(out.reason.includes("Search"), "names the field");
@@ -298,7 +295,7 @@ await check("a blocked domain sends nothing to the provider at all", async () =>
   // Domain gating has to happen before the decision, not after: the point is
   // that the page never reaches OpenRouter, not that we ignore the answer.
   const browser = fakeBrowser({ url: "https://bank.test/x", rows: [row({ ref: "ref_1", role: "button", name: "Go" })] });
-  const client = fakeClient([{ operation: choice("CLICK", 0.95), target: choice("e1", 0.95), sensitive: noul(0), satisfied: notYet }]);
+  const client = fakeClient([{ operation: choice("CLICK", 0.95), click_target: choice("e1", 0.95), sensitive: noul(0), satisfied: notYet }]);
   const cfg = { ...CFG, blockedDomains: ["bank.test"] };
   const out = await navigate(browser.callTool, client, cfg, { tabId: 1, goal: "g", success_criteria: "s" });
   eq(out.status, "blocked", "status");
@@ -313,7 +310,7 @@ await check("an allowlist permits its own subdomains and refuses everything else
   eq(okClient.seen.length, 1, "subdomain was allowed through");
 
   const no = fakeBrowser({ url: "https://other.test/x", rows: [row({ ref: "ref_1", role: "button", name: "Go" })] });
-  const noClient = fakeClient([{ operation: choice("CLICK", 0.9), target: choice("e1", 0.9), sensitive: noul(0), satisfied: notYet }]);
+  const noClient = fakeClient([{ operation: choice("CLICK", 0.9), click_target: choice("e1", 0.9), sensitive: noul(0), satisfied: notYet }]);
   await navigate(no.callTool, noClient, cfg, { tabId: 1, goal: "g", success_criteria: "s" });
   eq(noClient.seen.length, 0, "an off-list domain never reached the provider");
 });
@@ -354,8 +351,8 @@ await check("a link click waits for its navigation, not for the dropdown closing
     return inner(name, args);
   };
   const client = fakeClient([
-    { operation: choice("CLICK", 0.95), target: choice("e2", 0.95), sensitive: noul(0), satisfied: notYet },
-    { operation: choice("CLICK", 0.95), target: choice("e1", 0.95), sensitive: noul(0), satisfied: noul(0.95) }
+    { operation: choice("CLICK", 0.95), click_target: choice("e2", 0.95), sensitive: noul(0), satisfied: notYet },
+    { operation: choice("CLICK", 0.95), click_target: choice("e1", 0.95), sensitive: noul(0), satisfied: noul(0.95) }
   ]);
   const out = await navigate(callTool, client, CFG, { tabId: 1, goal: "open what links here", success_criteria: "the page is open" });
   eq(out.status, "done", `reason: ${out.reason}`);
@@ -390,7 +387,7 @@ await check("jev_decide returns a short distribution in one id space", async () 
   rows.forEach((_, i) => { probs[`e${i + 1}`] = i === 0 ? 0.7 : 0.3 / 11; });
   const client = fakeClient([{
     operation: choice("CLICK", 0.9),
-    target: { type: "choice", choice: "e1", confidence: 0.7, probabilities: probs },
+    click_target: { type: "choice", choice: "e1", confidence: 0.7, probabilities: probs },
     sensitive: noul(0.02), satisfied: notYet
   }]);
   const out = await decideOnce(browser.callTool, client, CFG, { tabId: 1, goal: "g", success_criteria: "s" });
@@ -423,8 +420,8 @@ await check("a submit is judged on the URL, not on the text it just typed", asyn
     return realRead(name, args);
   };
   const client = fakeClient([
-    { operation: choice("TYPE_AND_SUBMIT", 0.95), target: choice("e1", 0.95), value_key: choice("q", 1), sensitive: noul(0), satisfied: notYet },
-    { operation: choice("TYPE_AND_SUBMIT", 0.95), target: choice("e1", 0.95), value_key: choice("q", 1), sensitive: noul(0), satisfied: noul(0.95) }
+    { operation: choice("TYPE_AND_SUBMIT", 0.95), text_target: choice("e1", 0.95), value_key: choice("q", 1), sensitive: noul(0), satisfied: notYet },
+    { operation: choice("TYPE_AND_SUBMIT", 0.95), text_target: choice("e1", 0.95), value_key: choice("q", 1), sensitive: noul(0), satisfied: noul(0.95) }
   ]);
   const out = await navigate(callTool, client, CFG, { tabId: 1, goal: "search", success_criteria: "results are shown", values: { q: "blink" } });
   eq(out.status, "done", `reason: ${out.reason}`);
@@ -461,7 +458,7 @@ await check("an oscillation is caught even though the page changes every step", 
         : [row({ ref: "ref_1", role: "button", name: "Filter" })];
     }
   });
-  const client = fakeClient([{ operation: choice("CLICK", 0.95), target: choice("e1", 0.95), sensitive: noul(0), satisfied: notYet }]);
+  const client = fakeClient([{ operation: choice("CLICK", 0.95), click_target: choice("e1", 0.95), sensitive: noul(0), satisfied: notYet }]);
   const out = await navigate(browser.callTool, client, CFG, { tabId: 1, goal: "g", success_criteria: "s" });
   eq(out.status, "needs_help", `status (reason: ${out.reason})`);
   assert(out.reason.includes("three times"), `reason: ${out.reason}`);
@@ -478,7 +475,7 @@ await check("a repeated action that keeps working is not mistaken for a loop", a
     rows: [row({ ref: "ref_1", role: "button", name: "Next" })],
     onClick: (s) => { s.url = `https://app.test/page/${++n}`; s.title = `Page ${n}`; }
   });
-  const client = fakeClient([{ operation: choice("CLICK", 0.95), target: choice("e1", 0.95), sensitive: noul(0), satisfied: notYet }]);
+  const client = fakeClient([{ operation: choice("CLICK", 0.95), click_target: choice("e1", 0.95), sensitive: noul(0), satisfied: notYet }]);
   const out = await navigate(browser.callTool, client, CFG, { tabId: 1, goal: "g", success_criteria: "s", max_steps: 5 });
   eq(out.status, "limit_reached", `should run to the cap, not bail: ${out.reason}`);
   eq(out.steps.length, 5, "all five steps ran");
@@ -487,7 +484,7 @@ await check("a repeated action that keeps working is not mistaken for a loop", a
 await check("max_steps is honoured and cannot be raised past the config cap", async () => {
   let n = 0;
   const browser = fakeBrowser({ rows: [row({ ref: "ref_1", role: "button", name: "Next" })], onClick: (s) => { s.url = `https://app.test/${++n}`; } });
-  const client = fakeClient([(state) => ({ operation: choice("CLICK", 0.95), target: choice("e1", 0.95), sensitive: noul(0), satisfied: notYet })]);
+  const client = fakeClient([(state) => ({ operation: choice("CLICK", 0.95), click_target: choice("e1", 0.95), sensitive: noul(0), satisfied: notYet })]);
   const out = await navigate(browser.callTool, client, CFG, { tabId: 1, goal: "g", success_criteria: "s", max_steps: 3 });
   eq(out.status, "limit_reached", "status");
   eq(out.steps.length, 3, "exactly three steps");
@@ -516,8 +513,8 @@ await check("the success check ends the run in the same request that spots it", 
     onClick: (s) => { s.url = "https://app.test/inv/9"; s.title = "Invoice 9"; }
   });
   const client = fakeClient([
-    { operation: choice("CLICK", 0.95), target: choice("e1", 0.95), sensitive: noul(0), satisfied: notYet },
-    { operation: choice("CLICK", 0.95), target: choice("e1", 0.95), sensitive: noul(0), satisfied: noul(0.95) }
+    { operation: choice("CLICK", 0.95), click_target: choice("e1", 0.95), sensitive: noul(0), satisfied: notYet },
+    { operation: choice("CLICK", 0.95), click_target: choice("e1", 0.95), sensitive: noul(0), satisfied: noul(0.95) }
   ]);
   const out = await navigate(browser.callTool, client, CFG, { tabId: 1, goal: "open the invoice", success_criteria: "an invoice detail page is shown" });
   eq(out.status, "done", `reason: ${out.reason}`);
@@ -527,7 +524,7 @@ await check("the success check ends the run in the same request that spots it", 
 
 await check("a goal already met on arrival finishes without touching the page", async () => {
   const browser = fakeBrowser({ rows: [row({ ref: "ref_1", role: "button", name: "Go" })] });
-  const client = fakeClient([{ operation: choice("CLICK", 0.9), target: choice("e1", 0.9), sensitive: noul(0), satisfied: noul(0.97) }]);
+  const client = fakeClient([{ operation: choice("CLICK", 0.9), click_target: choice("e1", 0.9), sensitive: noul(0), satisfied: noul(0.97) }]);
   const out = await navigate(browser.callTool, client, CFG, { tabId: 1, goal: "g", success_criteria: "s" });
   eq(out.status, "done", "status");
   eq(out.steps.length, 0, "no steps taken");
@@ -542,7 +539,7 @@ await check("one observation per step in the steady state", async () => {
     rows: [row({ ref: "ref_1", role: "button", name: "Next" })],
     onClick: (s) => { s.url = `https://app.test/${++n}`; }
   });
-  const client = fakeClient([{ operation: choice("CLICK", 0.95), target: choice("e1", 0.95), sensitive: noul(0), satisfied: notYet }]);
+  const client = fakeClient([{ operation: choice("CLICK", 0.95), click_target: choice("e1", 0.95), sensitive: noul(0), satisfied: notYet }]);
   const out = await navigate(browser.callTool, client, CFG, { tabId: 1, goal: "g", success_criteria: "s", max_steps: 4 });
   eq(out.steps.length, 4, "four steps");
   const reads = browser.calls.filter((c) => c.name === "read_page").length;
@@ -567,10 +564,10 @@ await check("subgoals run in sequence and each starts where the last one left of
   });
   // Each leg: act once, then report satisfied.
   const client = fakeClient([
-    { operation: choice("CLICK", 0.95), target: choice("e1", 0.95), sensitive: noul(0), satisfied: notYet },
-    { operation: choice("CLICK", 0.95), target: choice("e1", 0.95), sensitive: noul(0), satisfied: noul(0.95) },
-    { operation: choice("CLICK", 0.95), target: choice("e1", 0.95), sensitive: noul(0), satisfied: notYet },
-    { operation: choice("CLICK", 0.95), target: choice("e1", 0.95), sensitive: noul(0), satisfied: noul(0.95) }
+    { operation: choice("CLICK", 0.95), click_target: choice("e1", 0.95), sensitive: noul(0), satisfied: notYet },
+    { operation: choice("CLICK", 0.95), click_target: choice("e1", 0.95), sensitive: noul(0), satisfied: noul(0.95) },
+    { operation: choice("CLICK", 0.95), click_target: choice("e1", 0.95), sensitive: noul(0), satisfied: notYet },
+    { operation: choice("CLICK", 0.95), click_target: choice("e1", 0.95), sensitive: noul(0), satisfied: noul(0.95) }
   ]);
   const out = await navigate(browser.callTool, client, CFG, {
     tabId: 1,
@@ -597,10 +594,10 @@ await check("a finished leg hands the next leg its first action, saving a reques
     onClick: (s) => { clicks++; s.url = `https://app.test/${clicks}`; s.title = `Page ${clicks}`; }
   });
   const client = fakeClient([
-    { operation: choice("CLICK", 0.95), target: choice("e1", 0.95), sensitive: noul(0), satisfied: notYet,
-      next_operation: choice("CLICK", 0.2), next_target: choice("e1", 0.95), next_sensitive: noul(0), next_satisfied: notYet },
+    { operation: choice("CLICK", 0.95), click_target: choice("e1", 0.95), sensitive: noul(0), satisfied: notYet,
+      next_operation: choice("CLICK", 0.2), next_click_target: choice("e1", 0.95), next_sensitive: noul(0), next_satisfied: notYet },
     { operation: choice("DONE", 0.95), sensitive: noul(0), satisfied: noul(0.95),
-      next_operation: choice("CLICK", 0.95), next_target: choice("e1", 0.95), next_sensitive: noul(0), next_satisfied: notYet },
+      next_operation: choice("CLICK", 0.95), next_click_target: choice("e1", 0.95), next_sensitive: noul(0), next_satisfied: notYet },
     { operation: choice("DONE", 0.95), sensitive: noul(0), satisfied: noul(0.95) }
   ]);
   const out = await navigate(browser.callTool, client, CFG, {
@@ -620,7 +617,7 @@ await check("a carried action that fails the gate is re-asked, never executed", 
   const browser = fakeBrowser({ rows: [row({ ref: "ref_1", role: "button", name: "Proceed" })] });
   const client = fakeClient([
     { operation: choice("DONE", 0.95), sensitive: noul(0), satisfied: noul(0.95),
-      next_operation: choice("CLICK", 0.99), next_target: choice("e1", 0.99), next_sensitive: noul(0.99), next_satisfied: notYet },
+      next_operation: choice("CLICK", 0.99), next_click_target: choice("e1", 0.99), next_sensitive: noul(0.99), next_satisfied: notYet },
     { operation: choice("BLOCKED", 0.9), sensitive: noul(0), satisfied: notYet }
   ]);
   const out = await navigate(browser.callTool, client, CFG, {
@@ -649,8 +646,8 @@ await check("a next leg already satisfied on arrival finishes without a request"
 await check("a failing leg stops the run and names itself, and later legs never run", async () => {
   const browser = fakeBrowser({ rows: [row({ ref: "ref_1", role: "button", name: "Delete everything" })] });
   const client = fakeClient([
-    { operation: choice("CLICK", 0.95), target: choice("e1", 0.95), sensitive: noul(0), satisfied: noul(0.95) },
-    { operation: choice("CLICK", 0.99), target: choice("e1", 0.99), sensitive: noul(0.99), satisfied: notYet }
+    { operation: choice("CLICK", 0.95), click_target: choice("e1", 0.95), sensitive: noul(0), satisfied: noul(0.95) },
+    { operation: choice("CLICK", 0.99), click_target: choice("e1", 0.99), sensitive: noul(0.99), satisfied: notYet }
   ]);
   const out = await navigate(browser.callTool, client, CFG, {
     tabId: 1,
@@ -672,7 +669,7 @@ await check("max_steps bounds each subgoal, not the whole call", async () => {
     rows: [row({ ref: "ref_1", role: "button", name: "Next" })],
     onClick: (s) => { s.url = `https://app.test/${++n}`; }
   });
-  const client = fakeClient([{ operation: choice("CLICK", 0.95), target: choice("e1", 0.95), sensitive: noul(0), satisfied: notYet }]);
+  const client = fakeClient([{ operation: choice("CLICK", 0.95), click_target: choice("e1", 0.95), sensitive: noul(0), satisfied: notYet }]);
   const out = await navigate(browser.callTool, client, CFG, {
     tabId: 1, max_steps: 2,
     subgoals: [{ goal: "a", success_criteria: "x" }, { goal: "b", success_criteria: "y" }]
@@ -689,7 +686,7 @@ await check("final_check catches a setting a later step undid", async () => {
   // does exactly this — turning on "Split by problem" resets the section style.
   const browser = fakeBrowser({ rows: [row({ ref: "ref_1", role: "button", name: "Toggle" })] });
   const client = fakeClient([
-    { operation: choice("CLICK", 0.95), target: choice("e1", 0.95), sensitive: noul(0), satisfied: noul(0.95) },
+    { operation: choice("CLICK", 0.95), click_target: choice("e1", 0.95), sensitive: noul(0), satisfied: noul(0.95) },
     { verified: noul(0.05) }
   ]);
   const out = await navigate(browser.callTool, client, CFG, {
@@ -704,7 +701,7 @@ await check("final_check catches a setting a later step undid", async () => {
 await check("final_check holding leaves the run done, and costs one request", async () => {
   const browser = fakeBrowser({ rows: [row({ ref: "ref_1", role: "button", name: "Toggle" })] });
   const client = fakeClient([
-    { operation: choice("CLICK", 0.95), target: choice("e1", 0.95), sensitive: noul(0), satisfied: noul(0.95) },
+    { operation: choice("CLICK", 0.95), click_target: choice("e1", 0.95), sensitive: noul(0), satisfied: noul(0.95) },
     { verified: noul(0.96) }
   ]);
   const out = await navigate(browser.callTool, client, CFG, {
@@ -716,7 +713,7 @@ await check("final_check holding leaves the run done, and costs one request", as
 
 await check("no final_check means no extra request", async () => {
   const browser = fakeBrowser({ rows: [row({ ref: "ref_1", role: "button", name: "Toggle" })] });
-  const client = fakeClient([{ operation: choice("CLICK", 0.95), target: choice("e1", 0.95), sensitive: noul(0), satisfied: noul(0.95) }]);
+  const client = fakeClient([{ operation: choice("CLICK", 0.95), click_target: choice("e1", 0.95), sensitive: noul(0), satisfied: noul(0.95) }]);
   const out = await navigate(browser.callTool, client, CFG, { tabId: 1, goal: "g", success_criteria: "s" });
   eq(out.status, "done", "status");
   eq(client.seen.length, 1, "opt-in, so nothing extra is spent");
@@ -753,7 +750,7 @@ await check("a browser error stops the run instead of deciding on a blank page",
 
 await check("jev_decide proposes without acting", async () => {
   const browser = fakeBrowser({ rows: [row({ ref: "ref_1", role: "button", name: "Search" })] });
-  const client = fakeClient([{ operation: choice("CLICK", 0.9), target: choice("e1", 0.88), sensitive: noul(0.02), satisfied: notYet }]);
+  const client = fakeClient([{ operation: choice("CLICK", 0.9), click_target: choice("e1", 0.88), sensitive: noul(0.02), satisfied: notYet }]);
   const out = await decideOnce(browser.callTool, client, CFG, { tabId: 1, goal: "g", success_criteria: "s" });
   eq(out.status, "proposed", "status");
   eq(out.operation, "CLICK", "operation");

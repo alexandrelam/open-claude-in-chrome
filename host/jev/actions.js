@@ -113,6 +113,43 @@ export function isCompatible(operation, row) {
   }
 }
 
+// One target question per kind of operation, each offering only the rows that
+// kind of operation can act on.
+//
+// A single target question asked in parallel with the operation question had
+// to list every row, so its probability mass landed on rows the chosen
+// operation could never touch, and that mass read as doubt. On Wikipedia,
+// PRESS_ENTER split 0.58/0.41 between the search field and the Search button,
+// which is not a legal PRESS_ENTER target at all. jev-ultrafast's design
+// avoids this: a head that cannot name an illegal target leaves nothing to
+// renormalize away.
+export const TARGET_HEADS = {
+  click_target: {
+    accepts: "CLICK",
+    instructions: "If the next operation is CLICK, which element should be clicked? Pick the one whose label best matches the next step toward the goal."
+  },
+  text_target: {
+    accepts: "TYPE_TEXT",
+    instructions: "If the next operation types into or submits a field (TYPE_TEXT, TYPE_AND_SUBMIT or PRESS_ENTER), which field? Do not choose a field that already holds the value it needs, unless the next step is to submit it."
+  },
+  select_target: {
+    accepts: "SELECT",
+    instructions: "If the next operation is SELECT, which dropdown or list?"
+  }
+};
+
+/** The target question that answers for `operation`, or null if it takes none. */
+export function targetHead(operation) {
+  switch (operation) {
+    case "CLICK": return "click_target";
+    case "TYPE_TEXT":
+    case "TYPE_AND_SUBMIT":
+    case "PRESS_ENTER": return "text_target";
+    case "SELECT": return "select_target";
+    default: return null;
+  }
+}
+
 /** Which operations this page can actually support right now. */
 export function availableOperations(rows) {
   const ops = new Set(["SCROLL_DOWN", "SCROLL_UP", "WAIT", "DONE", "BLOCKED"]);

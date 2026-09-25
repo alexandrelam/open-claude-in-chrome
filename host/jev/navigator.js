@@ -19,7 +19,9 @@ import {
   looksSensitive,
   planToolCalls,
   rowLabel,
-  SUBMITTING_OPERATIONS
+  SUBMITTING_OPERATIONS,
+  TARGET_HEADS,
+  targetHead
 } from "./actions.js";
 import { shortlistRows, renderRow } from "./shortlist.js";
 import { MAX_CHOICES } from "./config.js";
@@ -146,20 +148,22 @@ function goalQuestions(idMap, { successCriteria, values }, prefix, preamble) {
     }
   };
 
-  // A Choice needs something to choose between. On a page with no usable rows
-  // the only sensible operations are the targetless ones, and asking anyway
-  // would send an empty criteria object.
+  // One head per kind of operation, each listing only the rows it can act on
+  // (see TARGET_HEADS). A head with no legal rows is omitted: a Choice needs
+  // something to choose between, and an empty criteria object is malformed.
   //
   // renderRow is the single row renderer, so what Jev chooses between carries
   // the same detail the state listing does (value, type, options).
-  if (idMap.size > 0) {
-    const targetCriteria = {};
-    for (const [id, row] of idMap) targetCriteria[id] = renderRow(row, id);
-    questions[`${prefix}target`] = {
+  for (const [head, spec] of Object.entries(TARGET_HEADS)) {
+    const criteria = {};
+    for (const [id, row] of idMap) {
+      if (isCompatible(spec.accepts, row)) criteria[id] = renderRow(row, id);
+    }
+    if (Object.keys(criteria).length === 0) continue;
+    questions[`${prefix}${head}`] = {
       type: "choice",
-      instructions:
-        `${preamble}If the operation acts on an element, which element? Pick the one whose label best matches the next step toward the goal.`,
-      criteria: targetCriteria
+      instructions: `${preamble}${spec.instructions}`,
+      criteria
     };
   }
 
@@ -237,44 +241,20 @@ export function validate(answers, idMap, cfg, { allowSensitive, values }) {
   let confidence = opAns.confidence;
 
   if (spec.needsTarget) {
-    const targetAns = answers.target;
+    const targetAns = answers[targetHead(operation)];
     row = targetAns?.choice ? idMap.get(targetAns.choice) : null;
     if (!row) {
       return { ok: false, status: "needs_help", operation, reason: `Jev chose target "${targetAns?.choice}", which is not in this observation.` };
     }
+    // Still checked: a head is shared by operations with different rules
+    // (TYPE_AND_SUBMIT refuses a combobox that TYPE_TEXT accepts).
     if (!isCompatible(operation, row)) {
       return { ok: false, status: "needs_help", operation, reason: `Operation ${operation} is not valid on ${rowLabel(row)}.` };
     }
-    // Score the target against the options that are LEGAL for the chosen
-    // operation, not against every row on the page.
-    //
-    // The target question is asked in parallel with the operation question, so
-    // its criteria list every row — including ones the chosen operation could
-    // never act on. That mass was being counted as doubt. Measured on
-    // Wikipedia: PRESS_ENTER put 0.58 on the search field and 0.41 on the
-    // Search *button*, which is not a legal PRESS_ENTER target at all; the pair
-    // dragged the action to 0.56 and escalated a run that was going perfectly.
-    // Conditioned on having chosen PRESS_ENTER, the field is ~0.97.
-    //
-    // This is not a loosened gate. It is the number meaning what it always
-    // claimed to: how sure we are of the target, given the operation.
-    const probs = targetAns.probabilities || {};
-    let legalMass = 0;
-    for (const [id, candidate] of idMap) {
-      if (isCompatible(operation, candidate)) legalMass += probs[id] ?? 0;
-    }
-    const chosenMass = probs[targetAns.choice] ?? 0;
-    // If almost all the mass sits on targets the chosen operation cannot act
-    // on, the two answers disagree about what is happening on this page.
-    // Renormalizing would turn that into a confident 1.0, so the coherence of
-    // the pair caps the result rather than being divided away.
-    const COHERENCE_FLOOR = 0.25;
-    const targetConfidence =
-      legalMass <= 0
-        ? targetAns.confidence
-        : legalMass < COHERENCE_FLOOR
-          ? Math.min(chosenMass / legalMass, legalMass / COHERENCE_FLOOR)
-          : chosenMass / legalMass;
+    // Every option in the head is legal for its operation, so the chosen
+    // option's probability already is the confidence in the target given the
+    // operation. Nothing is left to renormalize.
+    const targetConfidence = targetAns.probabilities?.[targetAns.choice] ?? targetAns.confidence;
 
     // The step is only as certain as its least certain half: a confident
     // operation aimed at a coin-flip target is not a confident action.
@@ -375,7 +355,7 @@ export async function decideOnce(callTool, client, cfg, args) {
     // same answer could not be lined up.
     probabilities: {
       operation: topN(answers.operation?.probabilities, 5),
-      target: topTargets(answers.target?.probabilities, idMap, 5)
+      target: topTargets(answers[targetHead(answers.operation?.choice) ?? "click_target"]?.probabilities, idMap, 5)
     },
     rows_offered: short.rows.length,
     rows_cut: short.cut,

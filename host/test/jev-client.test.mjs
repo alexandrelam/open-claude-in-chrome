@@ -116,6 +116,16 @@ await check("noul confidence maps onto the same 0..1 scale as choice", async () 
   close(normalizeAnswer({ type: "noul", noul: 0.5 }).confidence, 0, "can't tell");
 });
 
+await check("a question keyed like a response field is kept in the wrapped shape", async () => {
+  // jev_assess let Claude key a question "model"; the client dropped its answer
+  // as though it were the response's own model field.
+  const client = createClient(CFG, {
+    fetchImpl: fakeFetch([{ json: { model: "typesafe/jev-1.13", answers: { model: { type: "choice", choice: "s25", probabilities: { s25: 0.9 } } } } }])
+  });
+  const { answers } = await client.decide({}, {});
+  eq(answers.model?.choice, "s25", "answer keyed model survives");
+});
+
 await check("score answer keeps score, legend and distribution", async () => {
   const a = normalizeAnswer({
     type: "score", score: 1.05,

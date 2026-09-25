@@ -27,6 +27,7 @@ import { JEV_TOOLS } from "./jev/tools.js";
 import { resolveConfig, configError } from "./jev/config.js";
 import { createClient } from "./jev/client.js";
 import { navigate, decideOnce } from "./jev/navigator.js";
+import { assess } from "./jev/assess.js";
 
 function exitClean(code = 0) {
   try {
@@ -121,7 +122,9 @@ async function runJevTool(name, args) {
     const out =
       name === "jev_navigate"
         ? await navigate(callTool, client, cfg, args)
-        : await decideOnce(callTool, client, cfg, args);
+        : name === "jev_assess"
+          ? await assess(callTool, client, cfg, args)
+          : await decideOnce(callTool, client, cfg, args);
     return jsonResult(out);
   } catch (err) {
     return errorResult(

@@ -81,6 +81,50 @@ export const JEV_TOOLS = [
     }
   },
   {
+    name: "jev_assess",
+    description:
+      "Ask Jev YOUR questions about many items in one call, and read every answer at the end in one table. Use it whenever you would otherwise open or read items one by one to judge them: listings, profiles, search results, rows of data. Each item is a page to open (`url`), text you already have (`text`), or a page reached by first running a navigation `goal` (the same loop as jev_navigate). Questions are yes_no, choice or score, and Jev answers each with a probability — it never writes text. Put the facts a page cannot know, and your rules for judging, in `context` (e.g. today's new price and what counts as a good deal): Jev applies them to every item. Returns a per-question summary plus one row per item with the answers and a short excerpt, so you can check the doubtful ones yourself.",
+    paramShape: {
+      items: z
+        .array(
+          z.object({
+            url: z.string().optional().describe("Page to open and read. Only URLs you supply are ever opened."),
+            text: z.string().optional().describe("Text you already hold (e.g. an ad body you fetched). No browsing."),
+            goal: z.string().optional().describe("Run the navigation loop first (from `url` if given), then read the page it lands on."),
+            success_criteria: z.string().optional().describe("For `goal`: the observable end state."),
+            values: z.record(z.string()).optional().describe("For `goal`: text to type, as {label: value}."),
+            label: z.string().optional().describe("Your name for the item, echoed in the results."),
+            context: z.string().optional().describe("Facts about THIS item Jev should weigh, e.g. its price or storage."),
+            selector: z.string().optional().describe("CSS selector of the part of the page to read, overriding the call's `selector`.")
+          })
+        )
+        .describe(`Up to ${50} items. Text items run in parallel; items that open pages share the tab and run in order.`),
+      questions: z
+        .array(
+          z.object({
+            key: z.string().describe("Short identifier used in the results, e.g. good_deal."),
+            type: z.enum(["yes_no", "choice", "score"]),
+            question: z.string().describe("The question, stated fully — Jev sees nothing else of your intent."),
+            yes: z.string().optional().describe("yes_no: what counts as yes. Default 'Yes'."),
+            no: z.string().optional().describe("yes_no: what counts as no. Default 'No'."),
+            options: z.record(z.string()).optional().describe("choice: {key: description}, at least two."),
+            scale: z.array(z.string()).optional().describe("score: ordered labels, low to high, e.g. ['Poor','Fair','Good','Great'].")
+          })
+        )
+        .describe("Asked of every item, all in one Jev request per item."),
+      context: z
+        .string()
+        .optional()
+        .describe("Shared facts and rules applied to every item, e.g. 'New price today: 128 Go 527 €, 256 Go 680 €. A good deal is 15% or more below new, with an invoice.'"),
+      tabId: z.number().optional().describe("Tab to browse in. Required when any item has a url or goal."),
+      selector: z.string().optional().describe("CSS selector of the part of each page to read. Default: <main>, else the body."),
+      max_chars: z.number().optional().describe("Page text sent to Jev per item (default 4000)."),
+      return_chars: z.number().optional().describe("Excerpt of each item's text returned to you (default 300, 0 for none)."),
+      max_ms: z.number().optional().describe("Wall-clock budget for the whole call (default 180000). Items past it are reported as skipped."),
+      allow_sensitive: z.boolean().optional().describe("For items with a `goal`: permit actions that look irreversible. Default false.")
+    }
+  },
+  {
     name: "jev_decide",
     description:
       "Advisory: observe the tab and ask Jev what it would do next, WITHOUT doing it. Returns the proposed operation, the target element, the full probability distribution and whether the action looks sensitive. Use it to sanity-check the loop on a new site, or to see Jev's reasoning shape before committing to jev_navigate.",

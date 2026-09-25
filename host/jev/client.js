@@ -167,12 +167,13 @@ export function createClient(cfg, { fetchImpl = globalThis.fetch } = {}) {
     const answers = {};
     // Tolerate both {answers:{...}} and a bare answers object at the top level:
     // the endpoint is alpha, and this is the one shape change cheap to absorb.
-    const rawAnswers =
-      json && typeof json.answers === "object" && json.answers
-        ? json.answers
-        : json;
+    const wrapped = Boolean(json && typeof json.answers === "object" && json.answers);
+    const rawAnswers = wrapped ? json.answers : json;
     for (const [key, val] of Object.entries(rawAnswers || {})) {
-      if (key === "usage" || key === "model" || key === "id") continue;
+      // Only the bare shape mixes answers with the response's own fields. In
+      // the wrapped shape every key is a question, and skipping these there
+      // silently dropped a jev_assess question Claude had keyed "model".
+      if (!wrapped && (key === "usage" || key === "model" || key === "id")) continue;
       const norm = normalizeAnswer(val);
       if (norm) answers[key] = norm;
     }

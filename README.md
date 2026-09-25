@@ -461,7 +461,7 @@ over CDP, and since Chrome 136 CDP attach no longer works on the default
 profile — so none of them can drive the browser you are actually logged into.
 This one can, because the action still goes through the extension.
 
-### Two tools
+### The tools
 
 **`jev_navigate`** takes a subgoal and runs it to completion:
 
@@ -539,6 +539,42 @@ jev_navigate({
 **`jev_decide`** does the same observation and decision but performs no action,
 returning the proposal and the full probability distribution. Use it when trying
 the loop on a new site.
+
+### Asking Jev your own questions: `jev_assess`
+
+`jev_navigate` hands Jev the clicking. `jev_assess` hands it the judging, over
+many items in one call. Claude writes its questions once, puts the facts a page
+cannot know (and its rules for judging) in `context`, and lists the items:
+pages to open, text it already has, or pages reached by first running a
+navigation `goal`. Jev answers every question for every item, and Claude reads
+one table at the end instead of making a round trip per page.
+
+```
+jev_assess({
+  tabId: 12345,
+  context: "New price today: S25 128 Go 527 €, 256 Go 680 €. A great deal is 20%+ below new; fair is 10-20%.",
+  questions: [
+    { key: "invoice", type: "yes_no", question: "Does the seller say the purchase invoice comes with the phone?" },
+    { key: "deal", type: "choice", question: "How good is the asking price?",
+      options: { great: "20% or more below new", fair: "10-20% below new", poor: "Less than 10% below, or above" } }
+  ],
+  items: [
+    { url: "https://www.leboncoin.fr/ad/telephones_objets_connectes/3269561419", label: "Beausoleil" },
+    { text: "Samsung S25 256 Go, 500 €, facture Orange du 14/11/2025", label: "Nantes" }
+  ]
+})
+```
+
+The result has a `summary` (counts per question), then one row per item with
+its answers (`{ yes: 0.94 }` for yes/no, `{ choice, p, runner_up? }` for choice,
+`{ score, label }` for score) and a short excerpt so Claude can check the
+doubtful ones. Text items run in parallel. Items that open pages share the tab
+and run in order. Only URLs Claude supplies are opened, the domain rules apply
+before anything is sent, and one bad item does not stop the rest.
+
+Jev still never writes: every answer is a probability over options Claude
+defined. The quality of the table is the quality of the questions and of the
+rules in `context`.
 
 ### What it will not do
 

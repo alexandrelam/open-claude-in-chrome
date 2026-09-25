@@ -91,7 +91,7 @@ export function urlContradicts(criteria, url) {
   return null;
 }
 
-function hostOf(url) {
+export function hostOf(url) {
   try {
     return new URL(url).hostname;
   } catch {
@@ -99,7 +99,7 @@ function hostOf(url) {
   }
 }
 
-function domainAllowed(url, cfg) {
+export function domainAllowed(url, cfg) {
   const host = hostOf(url);
   if (!host) return true;
   const matches = (d) => host === d || host.endsWith(`.${d}`);

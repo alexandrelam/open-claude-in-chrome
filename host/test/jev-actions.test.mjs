@@ -14,7 +14,7 @@
 import {
   OPERATIONS, isCompatible, availableOperations, looksSensitive, planToolCalls, rowLabel
 } from "../jev/actions.js";
-import { resolveConfig, configError, MAX_STEPS_CEILING } from "../jev/config.js";
+import { resolveConfig, configError, MAX_STEPS_CEILING, MAX_CHOICES } from "../jev/config.js";
 import { splitSections, shortlistRows, estimateTokens, STATE_TOKEN_BUDGET } from "../jev/shortlist.js";
 
 const results = [];
@@ -174,6 +174,39 @@ await check("splitSections keeps rows contiguous and loses none", async () => {
   assert(secs.length > 1, "should split");
   eq(secs.flat().length, 95, "no row dropped");
   eq(secs.flat()[0].ref, "ref_0", "order preserved");
+});
+
+await check("max_rows is clamped to the provider's 255-choice ceiling", async () => {
+  // Not a preference: the Decisions API rejects a Choice with more than 255
+  // options outright (HTTP 400, "Too many choices"). A user raising the knob
+  // must get a smaller action space, never a failed request.
+  eq(resolveConfig({ JEV_MAX_ROWS: "500", OPENROUTER_API_KEY: "k" }, {}).maxRows, MAX_CHOICES, "env clamped");
+  eq(resolveConfig({ OPENROUTER_API_KEY: "k" }, { jev: { max_rows: 9999 } }).maxRows, MAX_CHOICES, "file clamped");
+  assert(resolveConfig({ OPENROUTER_API_KEY: "k" }, {}).maxRows <= MAX_CHOICES, "the default is under the ceiling");
+});
+
+await check("a typical article is shortlisted, but by the ceiling and not by tokens", async () => {
+  // Measured on a Wikipedia article (2026-09-25): ~400 usable rows serializing
+  // to ~1,100 tokens, i.e. 3.6% of the 32k window. The token budget has ample
+  // room; it is the provider's choice ceiling that forces the scoring pass.
+  const cfg = resolveConfig({ OPENROUTER_API_KEY: "k" }, {});
+  const rows = Array.from({ length: 400 }, (_, i) =>
+    row({ ref: `ref_${i}`, role: "link", name: `Section heading ${i}`, href: `https://en.wikipedia.org/wiki/Topic_${i}` })
+  );
+  const serialized = rows.map((r, i) => `e${i + 1} | ${r.role} | ${r.name}`).join("\n");
+  assert(
+    estimateTokens(serialized) < STATE_TOKEN_BUDGET / 2,
+    `tokens should not be the binding constraint here, got ${estimateTokens(serialized)}`
+  );
+  const out = await shortlistRows(rows, {
+    goal: "g", successCriteria: "s", maxRows: cfg.maxRows,
+    decide: async (_s, q) => {
+      const answers = {};
+      Object.keys(q).forEach((k, i) => { answers[k] = { type: "score", score: i, confidence: 0.9 }; });
+      return { answers };
+    }
+  });
+  assert(out.rows.length <= MAX_CHOICES, `offered ${out.rows.length}, ceiling is ${MAX_CHOICES}`);
 });
 
 await check("the token estimate is what actually gates, not the row count", async () => {

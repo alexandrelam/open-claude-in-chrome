@@ -196,9 +196,17 @@ export function parseTabContext(text, tabId) {
  * (host/tool-runtime.js L176), so they go out together rather than serially —
  * this is most of the per-step browser latency.
  */
-export async function observe(callTool, tabId, { excerptChars = 600 } = {}) {
+export async function observe(
+  callTool,
+  tabId,
+  { excerptChars = 600, maxChars = 200_000 } = {}
+) {
   const [pageRes, textRes, ctxRes] = await Promise.all([
-    callTool("read_page", { tabId, filter: "interactive" }),
+    // read_page truncates at 50k characters by default, which a large article
+    // reaches while still well inside Jev's context window — rows would be lost
+    // before the shortlister ever sees them, and a row that was never observed
+    // cannot be chosen. Read wide and let the token budget do the cutting.
+    callTool("read_page", { tabId, filter: "interactive", max_chars: maxChars }),
     callTool("get_page_text", { tabId }),
     callTool("tabs_context_mcp", {})
   ]);

@@ -174,6 +174,25 @@ await check("400 is not retried — a malformed request would just cost twice", 
   eq(f.calls.length, 1, "no retry");
 });
 
+await check("the 255-choice limit surfaces as a non-retryable error", async () => {
+  // A real response from the live API on 2026-09-25, when a Choice was built
+  // with 400 options. The limit is not in the published docs, so this fixture
+  // is the record of it — and it must not be retried, since the same oversized
+  // request would just fail again at full price.
+  const f = fakeFetch([{ status: 400, json: { error: { message: 'HTTP 400: {"detail":"Too many choices. Must have at most 255 choices."}', code: 400 } } }]);
+  const client = createClient(CFG, { fetchImpl: f });
+  let threw = null;
+  try {
+    await client.decide({}, {});
+  } catch (err) {
+    threw = err;
+  }
+  assert(threw instanceof JevError, "should throw JevError");
+  eq(threw.retryable, false, "must not be retried");
+  eq(f.calls.length, 1, "exactly one attempt");
+  assert(threw.message.includes("255"), "the limit is legible in the message");
+});
+
 await check("the budget stops the next request rather than the last one", async () => {
   const pricey = { json: { answers: {}, usage: { cost: 0.02 } } };
   const client = createClient({ ...CFG, budgetUsd: 0.01 }, { fetchImpl: fakeFetch([pricey]) });

@@ -11,8 +11,23 @@
 //
 // Run: node host/test/endpoint.test.mjs
 
+import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+
+// Point HOME at an empty directory before endpoint.js is imported.
+//
+// getPipePath() honours a `pipe` override from
+// ~/.config/open-claude-in-chrome/config.json ahead of the platform default
+// (endpoint.js L50), and the native host writes that key on a real install. So
+// on a developer machine that has actually run the extension, the forced-win32
+// branch below would read the POSIX socket path out of the real config and
+// fail — a false negative about code that is fine. os.homedir() reads $HOME on
+// POSIX and %USERPROFILE% on Windows, so overriding both isolates the test from
+// whatever the machine happens to have configured.
+const FAKE_HOME = fs.mkdtempSync(path.join(os.tmpdir(), "ocic-endpoint-test-"));
+process.env.HOME = FAKE_HOME;
+process.env.USERPROFILE = FAKE_HOME;
 
 const results = [];
 function check(name, fn) {
@@ -143,6 +158,10 @@ check("env override wins on every platform", () => {
     delete process.env.OCIC_PIPE;
   }
 });
+
+try {
+  fs.rmSync(FAKE_HOME, { recursive: true, force: true });
+} catch {}
 
 const failed = results.filter((r) => !r.ok);
 console.log(

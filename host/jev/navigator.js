@@ -21,6 +21,7 @@ import {
   rowLabel
 } from "./actions.js";
 import { shortlistRows, renderRow } from "./shortlist.js";
+import { MAX_CHOICES } from "./config.js";
 import { createTrace } from "./trace.js";
 import { BudgetExceeded } from "./client.js";
 
@@ -54,14 +55,18 @@ function domainAllowed(url, cfg) {
  */
 export function buildRequest(obs, rows, { goal, successCriteria, values }) {
   const idMap = new Map();
-  const elements = rows.map((row, i) => {
+  // Last line of defence against the provider's 255-option ceiling. The config
+  // clamp normally keeps us well under it; this makes a malformed request
+  // impossible to construct even from a caller that built its own cfg.
+  const capped = rows.slice(0, MAX_CHOICES);
+  const elements = capped.map((row, i) => {
     const id = `e${i + 1}`;
     idMap.set(id, row);
     return renderRow(row, id);
   });
 
   const valueKeys = Object.keys(values || {});
-  const ops = availableOperations(rows);
+  const ops = availableOperations(capped);
 
   const state = {
     goal,

@@ -41,9 +41,22 @@ const DEFAULTS = {
   max_steps: 20,
   max_ms: 60_000,
   min_confidence: 0.6,
-  // Jev's context window is 32k tokens. This is the row count at which
-  // shortlisting kicks in; the token estimate is the real gate (see budget.js).
-  max_rows: 120,
+  // The row count at which shortlisting kicks in. The token estimate against
+  // Jev's 32k window is meant to be the real gate; this is a secondary cap on
+  // how many options one Choice question should carry.
+  //
+  // Measured on a full Wikipedia article (2026-09-25): 401 usable rows
+  // serialized to 1,142 tokens — 3.6% of the window. At 120 this cap bound
+  // ~28x earlier than the token budget, cutting 281 rows that would have fit
+  // comfortably and forcing the extra scoring round trip, which made that page
+  // 3x slower and 7x more expensive than a single request.
+  //
+  // The provider caps a Choice at 255 options (MAX_CHOICES), so that — not the
+  // token budget — is the real ceiling for the target question. 240 leaves a
+  // little headroom under it. A page bigger than this still gets shortlisted,
+  // which is correct: past a couple of hundred options probability mass spreads
+  // thin enough that the min_confidence gate starts firing anyway.
+  max_rows: 240,
   budget_usd: 0.5,
   sensitive_threshold: 0.5,
   allowed_domains: null,
@@ -54,6 +67,13 @@ const DEFAULTS = {
 // this. Runaway loops on someone's logged-in banking tab are the failure mode
 // that matters, so the cap is not configurable.
 export const MAX_STEPS_CEILING = 50;
+
+// A hard provider limit, not a preference: the Decisions API rejects a Choice
+// question with more than 255 options ("Too many choices. Must have at most 255
+// choices.", HTTP 400). Found by exceeding it against the live API on
+// 2026-09-25; it is not in the published docs. max_rows is clamped to it, so a
+// user raising JEV_MAX_ROWS gets a smaller action space rather than a 400.
+export const MAX_CHOICES = 255;
 
 function num(raw, fallback) {
   if (raw === undefined || raw === null || raw === "") return fallback;
@@ -98,7 +118,10 @@ export function resolveConfig(env = process.env, file = readConfigFile()) {
       env.JEV_MIN_CONFIDENCE,
       num(j.min_confidence, DEFAULTS.min_confidence)
     ),
-    maxRows: num(env.JEV_MAX_ROWS, num(j.max_rows, DEFAULTS.max_rows)),
+    maxRows: Math.min(
+      num(env.JEV_MAX_ROWS, num(j.max_rows, DEFAULTS.max_rows)),
+      MAX_CHOICES
+    ),
     budgetUsd: num(env.JEV_BUDGET_USD, num(j.budget_usd, DEFAULTS.budget_usd)),
     sensitiveThreshold: num(
       env.JEV_SENSITIVE_THRESHOLD,

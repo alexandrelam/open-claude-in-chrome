@@ -509,6 +509,7 @@ Environment first, then the `jev` object in the config file, then defaults:
 | `JEV_MAX_STEPS` | `20` | Hard ceiling 50, not raisable |
 | `JEV_MAX_MS` | `60000` | Wall-clock budget per call |
 | `JEV_MIN_CONFIDENCE` | `0.6` | Below this the loop hands back rather than guessing |
+| `JEV_MAX_ROWS` | `500` | Cap on elements offered in one decision. Past this, sections are scored for relevance and the rest are cut — which costs an extra round trip, so the cap is set above what an ordinary page produces |
 | `JEV_BUDGET_USD` | `0.5` | Per call, enforced against the exact `usage.cost` the API returns |
 | `JEV_PROVIDER` | `openrouter` | `typesafe` calls TypeSafe directly with `TYPESAFE_API_KEY` |
 

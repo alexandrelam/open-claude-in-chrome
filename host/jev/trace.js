@@ -16,6 +16,44 @@ export function newRunId() {
     .slice(2, 8)}`;
 }
 
+/**
+ * One line per run in summary.jsonl.
+ *
+ * The full traces are large and one file each, which is right for debugging a
+ * single run and useless for the question that actually matters: how often does
+ * this hand back to Claude, and at what confidence. The PRD sets a target of
+ * under 30% escalation and nothing measured it. This is the cheapest thing that
+ * makes the rate and the confidence spread computable from real usage, so
+ * min_confidence can be tuned from data rather than from a guess.
+ */
+function appendSummary(dir, trace) {
+  const confidences = trace.steps
+    .map((s) => s.answers?.operation?.confidence)
+    .filter((c) => typeof c === "number")
+    .map((c) => Number(c.toFixed(3)));
+  const line = {
+    run_id: trace.run_id,
+    at: trace.finished_at,
+    goal: trace.goal,
+    subgoals: (trace.subgoals || []).length || 1,
+    status: trace.result?.status,
+    // The single number the PRD's escalation target is about.
+    escalated: trace.result?.status === "needs_help" || trace.result?.status === "needs_value",
+    reason: trace.result?.reason ?? null,
+    steps: trace.steps.length,
+    confidences,
+    satisfied_final: trace.steps.at(-1)?.satisfied ?? null,
+    rows_offered_max: Math.max(0, ...trace.steps.map((s) => s.rows_offered ?? 0)),
+    rows_cut_total: trace.steps.reduce((a, s) => a + (s.rows_cut ?? 0), 0),
+    requests: trace.usage?.requests ?? null,
+    cost_usd: trace.usage?.cost_usd ?? null,
+    jev_ms: trace.usage?.jev_ms ?? null,
+    browser_ms: trace.usage?.browser_ms ?? null,
+    model: trace.usage?.resolved_model ?? null
+  };
+  fs.appendFileSync(path.join(dir, "summary.jsonl"), JSON.stringify(line) + "\n");
+}
+
 export function createTrace(dir, meta) {
   const runId = newRunId();
   const trace = {
@@ -41,6 +79,7 @@ export function createTrace(dir, meta) {
           path.join(dir, `${runId}.json`),
           JSON.stringify(trace, null, 2)
         );
+        appendSummary(dir, trace);
       } catch (err) {
         process.stderr.write(`[jev] could not write trace: ${err?.message ?? err}\n`);
       }

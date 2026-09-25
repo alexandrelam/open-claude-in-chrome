@@ -461,6 +461,21 @@ and a status:
 Anything other than `done` hands control back: read `reason`, take that one step
 yourself with the ordinary tools, and delegate again.
 
+For a multi-part task, pass several subgoals and it runs them in sequence in one
+call — each leg starts from the page the last one left, and the run stops at the
+first leg that does not finish, naming it so you know where to resume:
+
+```
+jev_navigate({
+  tabId: 12345,
+  values: { query: "ACME Corp" },
+  subgoals: [
+    { goal: "search for the customer", success_criteria: "search results for ACME Corp are listed" },
+    { goal: "open their most recent invoice", success_criteria: "an invoice detail page with a total is shown" }
+  ]
+})
+```
+
 **`jev_decide`** does the same observation and decision but performs no action,
 returning the proposal and the full probability distribution. Use it when trying
 the loop on a new site.
@@ -543,6 +558,18 @@ OPENROUTER_API_KEY=sk-or-v1-... node scratch/jev-spike.mjs <tabId> "open the lat
 It prints the state size against Jev's 32k-token window, the latency split
 between the browser and the model, the exact cost, the full distribution, and
 what the gate would have done.
+
+Every run also appends a line to
+`~/.config/open-claude-in-chrome/jev-runs/summary.jsonl`, so the escalation rate
+and confidence spread are computable from real usage rather than guessed at:
+
+```bash
+python3 -c "
+import json,os
+rows=[json.loads(l) for l in open(os.path.expanduser('~/.config/open-claude-in-chrome/jev-runs/summary.jsonl'))]
+esc=sum(1 for r in rows if r['escalated'])
+print(f'{len(rows)} runs, {esc} escalated ({100*esc/len(rows):.0f}%)')"
+```
 
 
 ## Available Tools

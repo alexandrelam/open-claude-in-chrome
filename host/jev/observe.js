@@ -174,6 +174,16 @@ export function isToolError(result) {
   return resultText(result).startsWith("Error: ");
 }
 
+/** Drop get_page_text's "Title:/URL:/Source:" preamble, keeping the body. */
+export function stripTextHeader(text) {
+  const blank = text.indexOf("\n\n");
+  if (blank === -1) return text;
+  const head = text.slice(0, blank);
+  // Only strip a header that actually looks like one, so a page whose body
+  // happens to start with a blank line is not truncated.
+  return /^Title:/.test(head) ? text.slice(blank + 2) : text;
+}
+
 /** tabs_context_mcp prefixes its prose with a JSON blob. Pull the tab out. */
 export function parseTabContext(text, tabId) {
   const brace = text.indexOf("{");
@@ -199,7 +209,7 @@ export function parseTabContext(text, tabId) {
 export async function observe(
   callTool,
   tabId,
-  { excerptChars = 600, maxChars = 200_000 } = {}
+  { excerptChars = 300, maxChars = 200_000 } = {}
 ) {
   const [pageRes, textRes, ctxRes] = await Promise.all([
     // read_page truncates at 50k characters by default, which a large article
@@ -217,9 +227,31 @@ export async function observe(
 
   const { rows, truncated } = parsePage(resultText(pageRes));
   const ctx = parseTabContext(resultText(ctxRes), tabId) || { url: "", title: "" };
+  // get_page_text returns "Title: ...\nURL: ...\nSource: <tag>\n\n<body>".
+  // The header has to come off before the excerpt is measured: the title and
+  // URL are already separate fields in the state, so keeping them here spent
+  // about a quarter of the budget restating them.
+  //
+  // Keep it SHORT. The excerpt is the only window Jev has onto non-interactive
+  // content, so the instinct is to send more — but measured on a Wikipedia
+  // search box with the query already typed, more prose actively degrades the
+  // action decision by diluting it:
+  //
+  //     excerpt chars    chosen operation    confidence
+  //         0            PRESS_ENTER            0.73
+  //       300            PRESS_ENTER            0.77
+  //      1200            PRESS_ENTER            0.53   (below the 0.6 gate)
+  //
+  // At 1200 the TYPE_TEXT probability climbed from 0.05 to 0.32 — the page's
+  // encyclopaedia prose crowds out the one fact that matters, that the field is
+  // already filled. 300 characters of real content beats both a longer excerpt
+  // and none at all.
   const excerpt = isToolError(textRes)
     ? ""
-    : resultText(textRes).replace(/\s+/g, " ").trim().slice(0, excerptChars);
+    : stripTextHeader(resultText(textRes))
+        .replace(/\s+/g, " ")
+        .trim()
+        .slice(0, excerptChars);
 
   return {
     url: ctx.url,

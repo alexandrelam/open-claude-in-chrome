@@ -13,16 +13,30 @@ export const JEV_TOOLS = [
     paramShape: {
       goal: z
         .string()
+        .optional()
         .describe(
-          'The subgoal in natural language, e.g. "open the most recent invoice". Keep it to one objective; break larger tasks into several calls.'
+          'A single subgoal in natural language, e.g. "open the most recent invoice". Use this or `subgoals`, not both.'
+        ),
+      subgoals: z
+        .array(
+          z.object({
+            goal: z.string().describe("This leg's objective."),
+            success_criteria: z.string().describe("Observable condition that means this leg is finished."),
+            values: z.record(z.string()).optional().describe("Text for this leg's fields, as {label: value}.")
+          })
+        )
+        .optional()
+        .describe(
+          "Several subgoals run in sequence in ONE call — prefer this for any multi-part task, since it collapses what would be several of your turns into one. Each leg starts from the page the previous one left. The run stops at the first leg that does not finish, and `reason` names which, so you can take that step yourself and call again with the rest."
         ),
       tabId: z
         .number()
         .describe("Tab ID to act in. Must be a tab in the MCP group — use tabs_context_mcp first."),
       success_criteria: z
         .string()
+        .optional()
         .describe(
-          'An observable condition checked against the page after each step, e.g. "an invoice detail page with a total is shown". Avoid criteria that depend on state not visible on the page.'
+          'Observable condition for `goal`, e.g. "an invoice detail page with a total is shown". Checked against the page on every step, so avoid criteria that depend on state not visible on the page. Required with `goal`; use the per-leg field inside `subgoals` instead.'
         ),
       values: z
         .record(z.string())
@@ -34,8 +48,8 @@ export const JEV_TOOLS = [
         .string()
         .optional()
         .describe("Navigate here before the first step. The loop itself can never navigate."),
-      max_steps: z.number().optional().describe("Maximum browser actions (default 20, hard cap 50)."),
-      max_ms: z.number().optional().describe("Wall-clock budget in milliseconds (default 60000)."),
+      max_steps: z.number().optional().describe("Maximum browser actions per subgoal (default 20, hard cap 50)."),
+      max_ms: z.number().optional().describe("Wall-clock budget in milliseconds for the whole call, across every subgoal (default 60000)."),
       min_confidence: z
         .number()
         .optional()

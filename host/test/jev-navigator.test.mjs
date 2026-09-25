@@ -318,6 +318,38 @@ await check("an allowlist permits its own subdomains and refuses everything else
   eq(noClient.seen.length, 0, "an off-list domain never reached the provider");
 });
 
+await check("a submit is judged on the URL, not on the text it just typed", async () => {
+  // The bug this pins: TYPE_AND_SUBMIT changes the page signature the instant
+  // the value lands, so a signature-based settle check reads "the page moved"
+  // while the navigation is still in flight. The loop then decided from the old
+  // page and re-typed forever. Judged on the URL, it waits for the real effect.
+  let pending = 0;
+  const browser = fakeBrowser({
+    rows: [row({ ref: "ref_1", role: "searchbox", name: "Search", type: "search" })],
+    onClick: (st) => {
+      // The value lands at once; the navigation takes a couple of reads.
+      st.rows = [row({ ref: "ref_1", role: "searchbox", name: "Search", type: "search", value: "blink" })];
+      pending = 2;
+    }
+  });
+  const realRead = browser.callTool;
+  const callTool = async (name, args) => {
+    if (name === "tabs_context_mcp" && pending > 0 && --pending === 0) {
+      browser.state.url = "https://app.test/results";
+      browser.state.title = "Results";
+    }
+    return realRead(name, args);
+  };
+  const client = fakeClient([
+    { operation: choice("TYPE_AND_SUBMIT", 0.95), target: choice("e1", 0.95), value_key: choice("q", 1), sensitive: noul(0), satisfied: notYet },
+    { operation: choice("TYPE_AND_SUBMIT", 0.95), target: choice("e1", 0.95), value_key: choice("q", 1), sensitive: noul(0), satisfied: noul(0.95) }
+  ]);
+  const out = await navigate(callTool, client, CFG, { tabId: 1, goal: "search", success_criteria: "results are shown", values: { q: "blink" } });
+  eq(out.status, "done", `reason: ${out.reason}`);
+  eq(out.steps.length, 1, "one step, not a retype loop");
+  eq(out.final_url, "https://app.test/results", "waited for the navigation to land");
+});
+
 await check("two steps that change nothing hand back rather than grinding to the cap", async () => {
   const browser = fakeBrowser({ rows: [row({ ref: "ref_1", role: "button", name: "Go" })] });
   const client = fakeClient([

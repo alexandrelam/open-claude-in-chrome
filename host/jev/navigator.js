@@ -18,7 +18,8 @@ import {
   isCompatible,
   looksSensitive,
   planToolCalls,
-  rowLabel
+  rowLabel,
+  SUBMITTING_OPERATIONS
 } from "./actions.js";
 import { shortlistRows, renderRow } from "./shortlist.js";
 import { MAX_CHOICES } from "./config.js";
@@ -274,7 +275,7 @@ export async function decideOnce(callTool, client, cfg, args) {
   if (failure) return { status: failure.status, reason: failure.reason };
 
   const short = await shortlistRows(obs.rows, {
-    goal, successCriteria, maxRows: cfg.maxRows,
+    goal, successCriteria, values, maxRows: cfg.maxRows,
     decide: (s, q) => client.decide(s, q)
   });
   const { state, questions, idMap } = buildRequest(obs, short.rows, { goal, successCriteria, values });
@@ -385,7 +386,7 @@ async function runSubgoal(callTool, client, cfg, sub, opts, ctx) {
     let short, request, answers, jevMs, verdict;
     try {
       short = await shortlistRows(obs.rows, {
-        goal, successCriteria, maxRows: cfg.maxRows,
+        goal, successCriteria, values, maxRows: cfg.maxRows,
         decide: (st, q) => client.decide(st, q)
       });
       request = buildRequest(obs, short.rows, { goal, successCriteria, values });
@@ -473,7 +474,32 @@ async function runSubgoal(callTool, client, cfg, sub, opts, ctx) {
 
     // Observe once, and keep it: it is both this step's did-anything-move check
     // and the next step's starting observation.
-    const { obs: after, failure: afterFail } = await observeNow();
+    //
+    // Let the action land before judging it. A click or a submit starts a
+    // navigation that is still in flight microseconds later, and the browser
+    // calls themselves take ~20ms, so reading straight away can catch the old
+    // page and conclude nothing happened. The loop used to get this settle time
+    // by accident, from the ~400ms Jev round trip of the following step;
+    // TYPE_AND_SUBMIT does three calls back to back and removed it, which left
+    // a successful search looking like a no-op.
+    //
+    // Only the unchanged case waits, so a page that already moved costs nothing.
+    const before = observationSignature(obs);
+    const beforeUrl = obs.url;
+    // A submit is judged on the URL: it has already changed the signature by
+    // putting text in the field, so the signature can no longer tell us whether
+    // the navigation landed. Measured: the submit completes around +300ms, and
+    // reading at +0ms caught the old page and looked like a no-op.
+    const settled = (o) =>
+      SUBMITTING_OPERATIONS.has(verdict.operation)
+        ? o.url !== beforeUrl
+        : observationSignature(o) !== before;
+
+    let { obs: after, failure: afterFail } = await observeNow();
+    for (let settle = 0; settle < 4 && !afterFail && !settled(after); settle++) {
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      ({ obs: after, failure: afterFail } = await observeNow());
+    }
     if (afterFail) {
       if (after) ctx.obs = after;
       return { status: afterFail.status, reason: afterFail.reason, steps };

@@ -9,6 +9,8 @@
 // Approach follows vlad-terin/jev-browser's split/shortlist/reduce shape,
 // reimplemented rather than copied (its licence is not ours to assume).
 
+import { prefilter } from "./relevance.js";
+
 export const JEV_CONTEXT_TOKENS = 32_000;
 
 // Leave the question criteria, instructions and the answer room. The state is
@@ -70,13 +72,28 @@ const SCALE = ["Irrelevant", "Possibly relevant", "Directly relevant"];
  * row that was cut cannot be chosen, and that is the first thing to check when
  * a step comes back BLOCKED on a page that plainly had the right button.
  */
-export async function shortlistRows(rows, { goal, successCriteria, maxRows, decide }) {
-  const fits =
-    rows.length <= maxRows &&
-    estimateTokens(rows.map((r, i) => renderRow(r, `e${i + 1}`)).join("\n")) <=
-      STATE_TOKEN_BUDGET;
-  if (fits) return { rows, cut: 0, scored: false, sections: 1 };
+export async function shortlistRows(rows, { goal, successCriteria, values, maxRows, decide }) {
+  // Deterministic narrowing first. It costs nothing, and on a dense page it
+  // usually gets under the cap on its own — which is the whole point, because
+  // the scoring pass below is a second Jev round trip on every step.
+  const pre = prefilter(rows, { goal, successCriteria, values, limit: maxRows });
+  const narrowed = pre.rows;
 
+  const fits =
+    narrowed.length <= maxRows &&
+    estimateTokens(narrowed.map((r, i) => renderRow(r, `e${i + 1}`)).join("\n")) <=
+      STATE_TOKEN_BUDGET;
+  if (fits) {
+    return {
+      rows: narrowed,
+      cut: rows.length - narrowed.length,
+      noise: pre.noise,
+      scored: false,
+      sections: 1
+    };
+  }
+
+  rows = narrowed;
   const sections = splitSections(rows);
 
   // No scorer available (jev_decide's advisory path, or a client-less test):

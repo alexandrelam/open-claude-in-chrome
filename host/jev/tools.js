@@ -36,7 +36,7 @@ export const JEV_TOOLS = [
         .string()
         .optional()
         .describe(
-          'Observable condition for `goal`, e.g. "an invoice detail page with a total is shown". Checked against the page on every step, so avoid criteria that depend on state not visible on the page. Required with `goal`; use the per-leg field inside `subgoals` instead.'
+          'Observable condition for `goal`, e.g. "an invoice detail page with a total is shown". Checked on every step. Prefer criteria about WHERE you are over criteria about page content — "the revision history view is open" reads far more reliably than "a list of revisions with dates is shown", because the check sees the page\'s controls plus a short text excerpt rather than the full body. Required with `goal`; use the per-leg field inside `subgoals` instead.'
         ),
       values: z
         .record(z.string())

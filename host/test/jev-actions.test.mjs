@@ -16,6 +16,7 @@ import {
 } from "../jev/actions.js";
 import { resolveConfig, configError, MAX_STEPS_CEILING, MAX_CHOICES } from "../jev/config.js";
 import { splitSections, shortlistRows, estimateTokens, STATE_TOKEN_BUDGET } from "../jev/shortlist.js";
+import { prefilter, isNoise, isControl, termsFrom } from "../jev/relevance.js";
 
 const results = [];
 async function check(name, fn) {
@@ -176,21 +177,76 @@ await check("a page that fits is passed through untouched and costs no Jev call"
   eq(called, 0, "no scoring pass for a small page");
 });
 
-await check("a large page is scored, cut to the cap, and reports what was lost", async () => {
-  const rows = Array.from({ length: 200 }, (_, i) => row({ ref: `ref_${i}`, role: "button", name: `Button number ${i}`, indent: i % 20 === 0 ? 0 : 2 }));
-  // Score the later sections highest, so a correct implementation must reorder
-  // by relevance and then restore document order.
-  const decide = async (_state, questions) => {
-    const answers = {};
-    Object.keys(questions).forEach((k, idx) => { answers[k] = { type: "score", score: idx, confidence: 0.9 }; });
-    return { answers };
-  };
-  const out = await shortlistRows(rows, { goal: "g", successCriteria: "s", maxRows: 60, decide });
-  assert(out.scored, "should have scored");
-  assert(out.rows.length <= 60, `kept ${out.rows.length}, cap was 60`);
-  assert(out.cut > 0, "should report the cut");
+await check("a large page is narrowed without a scoring round trip", async () => {
+  // This used to require a Jev *scoring* request on every step. The
+  // deterministic prefilter now gets an ordinary dense page under the cap on
+  // its own, which is the whole point: that pass was a second round trip on
+  // exactly the pages that were already slowest.
+  const rows = Array.from({ length: 400 }, (_, i) =>
+    row({ ref: `ref_${i}`, role: "link", name: `Section heading ${i}`, href: `https://x.test/${i}` })
+  );
+  let scored = 0;
+  const out = await shortlistRows(rows, {
+    goal: "g", successCriteria: "s", maxRows: 60,
+    decide: async () => { scored++; return { answers: {} }; }
+  });
+  eq(scored, 0, "no scoring request");
+  eq(out.rows.length, 60, "narrowed to the cap");
+  assert(out.cut > 0, "reports what was lost");
   const refs = out.rows.map((r) => Number(r.ref.split("_")[1]));
-  assert(refs.every((v, i) => i === 0 || v > refs[i - 1]), "survivors must be back in document order");
+  assert(refs.every((v, i) => i === 0 || v > refs[i - 1]), "survivors stay in document order");
+});
+
+await check("citation markers and nameless rows are dropped as noise", async () => {
+  // Measured on a Wikipedia article: 115 of 602 rows were "[1]"-style citation
+  // markers and 11 had no accessible name at all. Neither can ever be the thing
+  // the user asked for.
+  const rows = [
+    row({ ref: "ref_1", role: "link", name: "[1]", href: "https://x.test/#cite1" }),
+    row({ ref: "ref_2", role: "link", name: "[42]", href: "https://x.test/#cite42" }),
+    row({ ref: "ref_3", role: "link", name: "", href: "" }),
+    row({ ref: "ref_4", role: "link", name: "Past revisions of this page", href: "https://x.test/history" })
+  ];
+  const out = prefilter(rows, { goal: "g", successCriteria: "s", values: {}, limit: 50 });
+  eq(out.noise, 3, "three noise rows");
+  eq(out.rows.length, 1, "the real link survives");
+  eq(out.rows[0].ref, "ref_4", "and it is the right one");
+});
+
+await check("controls survive the cap no matter where they sit on the page", async () => {
+  // A form control is what actions are made of; losing one to a document-order
+  // cut would make the page unusable.
+  const rows = [
+    ...Array.from({ length: 300 }, (_, i) => row({ ref: `ref_${i}`, role: "link", name: `Body link ${i}`, href: `https://x.test/${i}` })),
+    row({ ref: "ref_deep", role: "searchbox", name: "Search", type: "search" })
+  ];
+  const out = prefilter(rows, { goal: "find something", successCriteria: "s", values: {}, limit: 50 });
+  assert(out.rows.some((r) => r.ref === "ref_deep"), "the searchbox survived");
+});
+
+await check("a row matching the goal survives even when buried deep", async () => {
+  // Document order is only the tie-break. Lexical matching is what rescues a
+  // target that sits past the cut.
+  const rows = [
+    ...Array.from({ length: 300 }, (_, i) => row({ ref: `ref_${i}`, role: "link", name: `Unrelated ${i}`, href: `https://x.test/${i}` })),
+    row({ ref: "ref_target", role: "link", name: "Blink browser engine", href: "https://x.test/blink" })
+  ];
+  const out = prefilter(rows, { goal: "open the Blink article", successCriteria: "the Blink page is shown", values: {}, limit: 50 });
+  assert(out.rows.some((r) => r.ref === "ref_target"), "the goal-matching row survived the cut");
+});
+
+await check("lexical matching only adds rows, it never removes them", async () => {
+  // The critical safety property. Measured case: the goal "open the page's edit
+  // history" has ZERO word overlap with the link that does it, "Past revisions
+  // of this page". A filter that required a lexical hit would have cut the one
+  // right answer.
+  const rows = [
+    row({ ref: "ref_1", role: "link", name: "Past revisions of this page", href: "https://x.test/history" }),
+    row({ ref: "ref_2", role: "link", name: "Something else", href: "https://x.test/other" })
+  ];
+  const out = prefilter(rows, { goal: "open the page's edit history", successCriteria: "revisions are listed", values: {}, limit: 50 });
+  eq(out.rows.length, 2, "nothing removed when under the cap");
+  assert(out.rows.some((r) => r.ref === "ref_1"), "the zero-overlap target is still there");
 });
 
 await check("shortlisting degrades deterministically with no scorer", async () => {

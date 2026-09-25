@@ -25,12 +25,31 @@ export const OPERATIONS = {
   TYPE_TEXT: {
     needsTarget: true,
     needsValue: true,
-    description: "Enter one of the provided values into an editable field"
+    // The boundary with TYPE_AND_SUBMIT has to be stated, not implied. Left
+    // vague ("enter a value into a field"), both read as correct for a search
+    // box and Jev hedged 0.61/0.38 between them — enough to drag a certain
+    // action under the confidence gate and escalate it.
+    description:
+      "Enter a value into a field and then STOP, leaving it unsubmitted. Only correct when other fields still have to be filled before this form is sent. Never the right choice for a lone search box."
   },
   SELECT: {
     needsTarget: true,
     needsValue: true,
     description: "Pick an option in a dropdown or list"
+  },
+  // One decision instead of two.
+  //
+  // TYPE_TEXT followed by PRESS_ENTER was costing two full Jev round trips
+  // (~400ms each) to do what a person does in one gesture, and submitting after
+  // typing into a search field is close to deterministic. The browser calls it
+  // expands to are ~20ms each, so collapsing the pair is nearly pure saving.
+  // TYPE_TEXT survives for the case this would get wrong: filling one field of
+  // a multi-field form, where submitting early is exactly the mistake.
+  TYPE_AND_SUBMIT: {
+    needsTarget: true,
+    needsValue: true,
+    description:
+      "Enter a value into a field and submit it immediately, in one action. The right choice for a search box, or for the last or only field of a form — anywhere a person would type and then press Enter without pausing."
   },
   // Without this there is no way to submit. Typing into a search box leaves the
   // text sitting there, and while many pages also offer a Search button, plenty
@@ -38,7 +57,8 @@ export const OPERATIONS = {
   // query and then had no legal move left.
   PRESS_ENTER: {
     needsTarget: true,
-    description: "Submit the text already entered in a field by pressing Enter"
+    description:
+      "Submit a field that ALREADY contains the right text, without changing it. Use when the value is in place from an earlier step."
   },
   SCROLL_DOWN: { needsTarget: false, description: "Reveal more of the page below" },
   SCROLL_UP: { needsTarget: false, description: "Go back up the page" },
@@ -49,6 +69,14 @@ export const OPERATIONS = {
     description: "No offered operation can advance the goal from this page"
   }
 };
+
+// Operations whose whole point is to submit, and therefore to navigate.
+//
+// These need their settle window judged on the URL rather than on the page
+// signature. The signature includes field values, so TYPE_AND_SUBMIT changes it
+// the instant the text lands — which reads as "the page moved" while the
+// navigation the step actually cares about is still in flight.
+export const SUBMITTING_OPERATIONS = new Set(["TYPE_AND_SUBMIT", "PRESS_ENTER"]);
 
 /** Can this operation act on this row? The gate, applied after Jev answers. */
 export function isCompatible(operation, row) {
@@ -68,6 +96,7 @@ export function isCompatible(operation, row) {
       // autocomplete list.
       return CLICK_ROLES.has(role) || TEXT_ROLES.has(role) || Boolean(row.href) || Boolean(row.type);
     case "PRESS_ENTER":
+    case "TYPE_AND_SUBMIT":
       return TEXT_ROLES.has(role) || Boolean(row.type);
     case "TYPE_TEXT":
       return TEXT_ROLES.has(role) || Boolean(row.type);
@@ -86,6 +115,7 @@ export function availableOperations(rows) {
     if (isCompatible("TYPE_TEXT", r)) {
       ops.add("TYPE_TEXT");
       ops.add("PRESS_ENTER");
+      ops.add("TYPE_AND_SUBMIT");
     }
     if (isCompatible("SELECT", r)) ops.add("SELECT");
   }
@@ -126,6 +156,11 @@ export function planToolCalls(operation, row, value, tabId) {
       return [
         ["computer", { action: "left_click", ref: row.ref, tabId }],
         ["computer", { action: "key", text: "Return", tabId }]
+      ];
+    case "TYPE_AND_SUBMIT":
+      return [
+        ...planToolCalls("TYPE_TEXT", row, value, tabId),
+        ...planToolCalls("PRESS_ENTER", row, value, tabId)
       ];
     case "TYPE_TEXT": {
       // form_input sets the value directly and fires the events a framework

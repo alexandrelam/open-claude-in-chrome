@@ -174,6 +174,44 @@ export function isToolError(result) {
   return resultText(result).startsWith("Error: ");
 }
 
+/**
+ * Strip text that merely repeats the interactive elements we already send.
+ *
+ * The excerpt's whole job is to show what the element list CANNOT: prose,
+ * tables, a revision list, an invoice total. On a page like Wikipedia the body
+ * text opens with the navigation — "Read Edit View history Tools Actions
+ * General..." — which is word for word the names of rows Jev already has, and
+ * it consumed the entire budget before any real content appeared. The per-step
+ * `satisfied` check then judged "a list of past revisions is shown" while
+ * looking at a menu, and sat on the fence at 0.50.
+ *
+ * Making the excerpt longer is not the fix — measured, that degrades the action
+ * decision by diluting it. Making it non-redundant is.
+ */
+export function dropElementEcho(text, rows) {
+  const names = [...new Set(
+    rows
+      .map((r) => (r.name || "").trim())
+      .filter((n) => n.length >= 3 && n.length <= 30)
+  )].sort((a, b) => b.length - a.length); // longest first, so "View history" wins over "View"
+  if (!names.length) return text;
+
+  // get_page_text has already collapsed every run of whitespace, so the body
+  // arrives as one long line with nothing to split on — the element names have
+  // to be removed in place. Longest-first with word boundaries keeps a longer
+  // label from being shredded by a shorter one that is its prefix.
+  let out = text;
+  for (const name of names) {
+    const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    out = out.replace(new RegExp(`(^|\\W)${escaped}(?=\\W|$)`, "gi"), "$1");
+  }
+  out = out.replace(/\s+/g, " ").trim();
+
+  // A page that is genuinely all controls would otherwise come back empty, and
+  // an excerpt of nothing is worse than a redundant one.
+  return out.length >= 40 ? out : text;
+}
+
 /** Drop get_page_text's "Title:/URL:/Source:" preamble, keeping the body. */
 export function stripTextHeader(text) {
   const blank = text.indexOf("\n\n");
@@ -246,9 +284,10 @@ export async function observe(
   // encyclopaedia prose crowds out the one fact that matters, that the field is
   // already filled. 300 characters of real content beats both a longer excerpt
   // and none at all.
+  const usable = usableRows(rows);
   const excerpt = isToolError(textRes)
     ? ""
-    : stripTextHeader(resultText(textRes))
+    : dropElementEcho(stripTextHeader(resultText(textRes)), usable)
         .replace(/\s+/g, " ")
         .trim()
         .slice(0, excerptChars);
@@ -256,7 +295,7 @@ export async function observe(
   return {
     url: ctx.url,
     title: ctx.title,
-    rows: usableRows(rows),
+    rows: usable,
     allRows: rows,
     truncated,
     excerpt

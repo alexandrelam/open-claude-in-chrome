@@ -1,26 +1,54 @@
 <p align="center">
-  <img src="extension/icons/icon128.png" width="96" alt="Open Claude in Chrome">
+  <img src="extension/icons/icon128.png" width="96" alt="Open Claude in Chrome + Jev">
 </p>
 
-<h1 align="center">Open Claude in Chrome</h1>
+<h1 align="center">Open Claude in Chrome + Jev</h1>
 
 <p align="center">
-  <em>Official Claude in Chrome gives you 58 blocked domains and two browsers.<br/>
-  <strong>Open Claude in Chrome gives you the whole web.</strong></em>
+  <em>Hand a browser subgoal to <a href="https://openrouter.ai/docs/guides/community/jev">Jev</a> in one call.<br/>
+  <strong>Jev picks every click. Your real, logged-in browser carries it out.</strong></em>
   <br/>
-  <sub>Clean-room reimplementation of Anthropic's browser extension. No blocklist. Any Chromium browser. 100% feature &amp; performance parity.</sub>
+  <sub>A fork of Open Claude in Chrome that adds TypeSafe's Jev decision model as an MCP server for Claude Code and Cursor. No blocklist. Any Chromium browser.</sub>
   <br/>
-  <sub>by <a href="https://noemica.io">noemica</a></sub>
+  <sub>Fork of <a href="https://github.com/noemica-io/open-claude-in-chrome">open-claude-in-chrome</a> by <a href="https://noemica.io">noemica</a></sub>
 </p>
 
 <p align="center">
+  <a href="#delegating-steps-to-jev">Jev</a> ·
   <a href="#whats-different">What's different</a> ·
   <a href="#installation">Install</a> ·
   <a href="#imitation-learning-recording">Imitation learning</a> ·
   <a href="#architecture">Architecture</a> ·
   <a href="https://youtu.be/n4-2fjOsGhw">Demo</a> ·
-  <a href="https://www.noemica.io/blog/reverse-engineered-claude-in-chrome">How I built it</a>
+  <a href="https://www.noemica.io/blog/reverse-engineered-claude-in-chrome">How upstream was built</a>
 </p>
+
+---
+
+## What this fork adds: Jev
+
+Most browser steps are mechanical choices ("click Search", "open the first row")
+that don't need a frontier model, yet each one costs a full orchestrator turn.
+This fork adds a `jev` server variant, `host/server-jev.js`, that hands those
+choices to [Jev](https://openrouter.ai/docs/guides/community/jev), TypeSafe's
+decision model, over OpenRouter:
+
+- **`jev_navigate`** takes a subgoal ("open the latest invoice") and runs it to
+  completion in one tool call, returning a structured result.
+- **`jev_decide`** does the same observation and decision without acting.
+- Jev only chooses among elements the harness actually observed; sensitive
+  actions are gated, and every call has step, time and dollar caps.
+
+Other Jev browser projects launch their own Playwright Chromium or attach over
+CDP, which no longer works on the default profile since Chrome 136. Here every
+action still goes through the extension, so Jev drives **the browser you are
+actually logged into**.
+
+```bash
+claude mcp add open-claude-in-chrome-jev --env OPENROUTER_API_KEY=sk-or-v1-... -- node /absolute/path/to/host/server-jev.js
+```
+
+Full details: [Delegating steps to Jev](#delegating-steps-to-jev).
 
 ---
 
@@ -34,7 +62,7 @@
 
 ---
 
-The official [Claude in Chrome](https://code.claude.com/docs/en/chrome) extension gives Claude Code full browser automation — as long as you stay within Anthropic's allowlist of "safe" sites. Open Claude in Chrome is a clean-room reimplementation that strips the restrictions while keeping all 21 MCP tools and matching the official extension's performance.
+The official [Claude in Chrome](https://code.claude.com/docs/en/chrome) extension gives Claude Code full browser automation — as long as you stay within Anthropic's allowlist of "safe" sites. Open Claude in Chrome, the upstream this fork builds on, is a clean-room reimplementation that strips the restrictions while keeping all 21 MCP tools and matching the official extension's performance.
 
 ## What's Different
 

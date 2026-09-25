@@ -75,7 +75,7 @@ function domainAllowed(url, cfg) {
  * Rows are addressed as e1..eN, not as ref_N. The mapping back to refs stays in
  * this process, so a ref Jev was not offered cannot come back out of it.
  */
-export function buildRequest(obs, rows, { goal, successCriteria, values }) {
+export function buildRequest(obs, rows, { goal, successCriteria, values }, next = null) {
   const idMap = new Map();
   // Last line of defence against the provider's 255-option ceiling. The config
   // clamp normally keeps us well under it; this makes a malformed request
@@ -88,7 +88,6 @@ export function buildRequest(obs, rows, { goal, successCriteria, values }) {
   });
 
   const valueKeys = Object.keys(values || {});
-  const ops = availableOperations(capped);
 
   // `elements` looks like a duplicate of the target question's criteria and is
   // not. Removing it to halve the payload was tried and reverted on 2026-09-25:
@@ -106,19 +105,43 @@ export function buildRequest(obs, rows, { goal, successCriteria, values }) {
     values: valueKeys
   };
 
+  const questions = goalQuestions(idMap, { successCriteria, values }, "", "");
+
+  // Speculative questions for the NEXT subgoal, answered on this same page.
+  //
+  // A third of all decisions in the audited Wikipedia chain did nothing but
+  // notice that a leg had finished; the next leg then observed the same page
+  // and asked again. Questions in one request are evaluated in parallel, so
+  // asking the next leg's questions here costs tokens, not time — and when
+  // `satisfied` passes, the next leg's first action is already decided.
+  // When it does not pass, the next_* answers are simply ignored.
+  if (next) {
+    const preamble =
+      `Assume the current goal is already complete. The NEXT goal is: ${next.goal}. ` +
+      `Its success criteria: ${next.successCriteria}. Answer for that NEXT goal. `;
+    Object.assign(questions, goalQuestions(idMap, next, "next_", preamble));
+  }
+
+  return { state, questions, idMap };
+}
+
+/**
+ * The questions that decide one step toward one goal, keyed with `prefix`.
+ * The current goal is carried by `state`; a prefixed goal carries its own
+ * description in `preamble`, because state can only describe one.
+ */
+function goalQuestions(idMap, { successCriteria, values }, prefix, preamble) {
+  const ops = availableOperations([...idMap.values()]);
+  const valueKeys = Object.keys(values || {});
+
   const operationCriteria = {};
   for (const op of ops) operationCriteria[op] = OPERATIONS[op].description;
 
-  // renderRow is the single row renderer, so what Jev chooses between carries
-  // the same detail the state listing used to add (value, type, options).
-  const targetCriteria = {};
-  for (const [id, row] of idMap) targetCriteria[id] = renderRow(row, id);
-
   const questions = {
-    operation: {
+    [`${prefix}operation`]: {
       type: "choice",
       instructions:
-        "What single operation should the browser agent take next to advance the goal? Choose DONE only if the success criteria are already visibly met on this page.",
+        `${preamble}What single operation should the browser agent take next to advance the goal? Choose DONE only if the success criteria are already visibly met on this page.`,
       criteria: operationCriteria
     }
   };
@@ -126,11 +149,16 @@ export function buildRequest(obs, rows, { goal, successCriteria, values }) {
   // A Choice needs something to choose between. On a page with no usable rows
   // the only sensible operations are the targetless ones, and asking anyway
   // would send an empty criteria object.
+  //
+  // renderRow is the single row renderer, so what Jev chooses between carries
+  // the same detail the state listing does (value, type, options).
   if (idMap.size > 0) {
-    questions.target = {
+    const targetCriteria = {};
+    for (const [id, row] of idMap) targetCriteria[id] = renderRow(row, id);
+    questions[`${prefix}target`] = {
       type: "choice",
       instructions:
-        "If the operation acts on an element, which element? Pick the one whose label best matches the next step toward the goal.",
+        `${preamble}If the operation acts on an element, which element? Pick the one whose label best matches the next step toward the goal.`,
       criteria: targetCriteria
     };
   }
@@ -138,10 +166,10 @@ export function buildRequest(obs, rows, { goal, successCriteria, values }) {
   if (valueKeys.length > 0) {
     const valueCriteria = { [NONE]: "None of the provided values belongs in this field" };
     for (const k of valueKeys) valueCriteria[k] = `The value provided under "${k}"`;
-    questions.value_key = {
+    questions[`${prefix}value_key`] = {
       type: "choice",
       instructions:
-        "If the operation types or selects, which provided value belongs in the target field?",
+        `${preamble}If the operation types or selects, which provided value belongs in the target field?`,
       criteria: valueCriteria
     };
   }
@@ -155,7 +183,7 @@ export function buildRequest(obs, rows, { goal, successCriteria, values }) {
   //
   // It also means completion is noticed the moment it happens, including when
   // the goal is already met on arrival.
-  questions.satisfied = {
+  questions[`${prefix}satisfied`] = {
     type: "noul",
     instructions: `Judging only by what is on this page right now, are these success criteria met: ${successCriteria}`,
     criteria: {
@@ -164,17 +192,27 @@ export function buildRequest(obs, rows, { goal, successCriteria, values }) {
     }
   };
 
-  questions.sensitive = {
+  questions[`${prefix}sensitive`] = {
     type: "noul",
     instructions:
-      "Would performing this action have a destructive, financial or otherwise irreversible effect?",
+      `${preamble}Would performing this action have a destructive, financial or otherwise irreversible effect?`,
     criteria: {
       true: "It pays, deletes, sends, publishes, submits or otherwise commits something that cannot simply be undone",
       false: "It only navigates, reads, filters or fills in a field, and is safe to undo"
     }
   };
 
-  return { state, questions, idMap };
+  return questions;
+}
+
+/** The answers to one goal's questions, with `prefix` stripped off the keys. */
+export function answersFor(answers, prefix) {
+  if (!prefix) return answers;
+  const out = {};
+  for (const [k, v] of Object.entries(answers || {})) {
+    if (k.startsWith(prefix)) out[k.slice(prefix.length)] = v;
+  }
+  return out;
 }
 
 /**
@@ -375,7 +413,8 @@ export function normalizeSubgoals(args) {
  * deadline, the running step number and the browser/Jev time split.
  */
 async function runSubgoal(callTool, client, cfg, sub, opts, ctx) {
-  const { tabId, allowSensitive, maxSteps, trace } = opts;
+  const { tabId, allowSensitive, maxSteps, trace, next } = opts;
+  let carry = opts.carry ?? null;
   const { goal, successCriteria, values } = sub;
 
   const steps = [];
@@ -429,30 +468,42 @@ async function runSubgoal(callTool, client, cfg, sub, opts, ctx) {
     }
     ctx.obs = obs;
 
-    let short, request, answers, jevMs, verdict, inputTokens;
-    try {
-      short = await shortlistRows(obs.rows, {
-        goal, successCriteria, values, maxRows: cfg.maxRows,
-        decide: (st, q) => client.decide(st, q)
-      });
-      request = buildRequest(obs, short.rows, { goal, successCriteria, values });
-      const res = await client.decide(request.state, request.questions);
-      answers = res.answers;
-      jevMs = res.ms;
-      inputTokens = tokensOf(res.usage);
-      ctx.jevMs += jevMs;
-    } catch (err) {
-      if (err instanceof BudgetExceeded) return { status: "limit_reached", reason: err.message, steps };
-      return { status: "needs_help", reason: `Jev request failed: ${err?.message ?? err}`, steps };
+    let short, request, answers, jevMs = 0, verdict, inputTokens = 0;
+    const carried = carry && carry.obs === obs ? carry : null;
+    carry = null;
+    if (carried) {
+      // Decided by the previous leg's request, on this very observation.
+      ({ short, request, answers, verdict } = carried);
+    } else {
+      try {
+        // Shortlist for both goals when the next one rides along, so the rows
+        // its first action needs are on offer too.
+        short = await shortlistRows(obs.rows, {
+          goal: next ? `${goal} ${next.goal}` : goal,
+          successCriteria: next ? `${successCriteria} ${next.successCriteria}` : successCriteria,
+          values: next ? { ...next.values, ...values } : values,
+          maxRows: cfg.maxRows,
+          decide: (st, q) => client.decide(st, q)
+        });
+        request = buildRequest(obs, short.rows, { goal, successCriteria, values }, next);
+        const res = await client.decide(request.state, request.questions);
+        answers = res.answers;
+        jevMs = res.ms;
+        inputTokens = tokensOf(res.usage);
+        ctx.jevMs += jevMs;
+      } catch (err) {
+        if (err instanceof BudgetExceeded) return { status: "limit_reached", reason: err.message, steps };
+        return { status: "needs_help", reason: `Jev request failed: ${err?.message ?? err}`, steps };
+      }
+      verdict = validate(answers, request.idMap, cfg, { allowSensitive, values });
     }
 
     const satisfied = answers.satisfied?.noul ?? 0;
-    verdict = validate(answers, request.idMap, cfg, { allowSensitive, values });
 
     trace.step({
-      i, subgoal: goal, url: obs.url, title: obs.title,
+      i, subgoal: goal, url: obs.url, title: obs.title, carried: Boolean(carried),
       rows_offered: short.rows.length, rows_cut: short.cut, truncated: obs.truncated,
-      satisfied, answers,
+      satisfied, answers: carried ? null : answers,
       verdict: { ok: verdict.ok, status: verdict.status ?? null, reason: verdict.reason ?? null },
       operation: verdict.operation, target_ref: verdict.row?.ref ?? null,
       jev_ms: jevMs, input_tokens: inputTokens
@@ -462,7 +513,7 @@ async function runSubgoal(callTool, client, cfg, sub, opts, ctx) {
     // action and before any gate: if the page already satisfies the criteria,
     // there is nothing left to do and nothing to refuse.
     if (satisfied > 0.5) {
-      return { status: "done", reason: null, steps, satisfied };
+      return { status: "done", reason: null, steps, satisfied, carry: next && !carried ? carryFor(answers, request, short, obs, next, cfg, allowSensitive) : null };
     }
 
     if (!verdict.ok) return { status: verdict.status, reason: verdict.reason, steps };
@@ -580,6 +631,23 @@ async function runSubgoal(callTool, client, cfg, sub, opts, ctx) {
   return { status: "limit_reached", reason: `Step limit of ${maxSteps} reached for this subgoal.`, steps };
 }
 
+/**
+ * The next leg's first decision, already answered by this leg's last request.
+ *
+ * Carried only when it is usable as-is: it passed the whole gate, or the next
+ * leg is already satisfied on this page. Anything else — a refusal, low
+ * confidence, a missing value — is dropped, and the next leg simply asks
+ * again, so the gate's verdict always comes from a decision it can act on.
+ */
+function carryFor(allAnswers, request, short, obs, next, cfg, allowSensitive) {
+  const answers = answersFor(allAnswers, "next_");
+  if (!answers.operation) return null;
+  const verdict = validate(answers, request.idMap, cfg, { allowSensitive, values: next.values });
+  const satisfied = answers.satisfied?.noul ?? 0;
+  if (!verdict.ok && !(satisfied > 0.5)) return null;
+  return { obs, short, request, answers, verdict };
+}
+
 /** The full loop over one or more subgoals. Backs the jev_navigate tool. */
 export async function navigate(callTool, client, cfg, args) {
   const { tabId, values = {}, start_url: startUrl, allow_sensitive: allowSensitive = false } = args;
@@ -658,12 +726,14 @@ export async function navigate(callTool, client, cfg, args) {
 
   const finalCheck = args.final_check ?? args.finalCheck ?? null;
 
+  let carry = null;
   for (const [idx, sub] of subgoals.entries()) {
     const leg = await runSubgoal(
       callTool, client, runCfg, sub,
-      { tabId, allowSensitive, maxSteps, trace },
+      { tabId, allowSensitive, maxSteps, trace, next: subgoals[idx + 1] ?? null, carry },
       ctx
     );
+    carry = leg.carry ?? null;
     legs.push({ i: idx + 1, goal: sub.goal, status: leg.status, steps: leg.steps, reason: leg.reason });
     allSteps.push(...leg.steps);
     status = leg.status;

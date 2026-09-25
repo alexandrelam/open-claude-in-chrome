@@ -587,6 +587,65 @@ await check("subgoals run in sequence and each starts where the last one left of
   eq(out.steps[1].i, 2, "step numbering is continuous across legs");
 });
 
+await check("a finished leg hands the next leg its first action, saving a request", async () => {
+  // The audited chain spent 7 of 17 requests on nothing but noticing a leg had
+  // finished. Now the request that notices also decides the next leg's first
+  // action, on the same page.
+  let clicks = 0;
+  const browser = fakeBrowser({
+    rows: [row({ ref: "ref_1", role: "link", name: "Go", href: "https://app.test/1" })],
+    onClick: (s) => { clicks++; s.url = `https://app.test/${clicks}`; s.title = `Page ${clicks}`; }
+  });
+  const client = fakeClient([
+    { operation: choice("CLICK", 0.95), target: choice("e1", 0.95), sensitive: noul(0), satisfied: notYet,
+      next_operation: choice("CLICK", 0.2), next_target: choice("e1", 0.95), next_sensitive: noul(0), next_satisfied: notYet },
+    { operation: choice("DONE", 0.95), sensitive: noul(0), satisfied: noul(0.95),
+      next_operation: choice("CLICK", 0.95), next_target: choice("e1", 0.95), next_sensitive: noul(0), next_satisfied: notYet },
+    { operation: choice("DONE", 0.95), sensitive: noul(0), satisfied: noul(0.95) }
+  ]);
+  const out = await navigate(browser.callTool, client, CFG, {
+    tabId: 1,
+    subgoals: [{ goal: "first leg", success_criteria: "page 1" }, { goal: "second leg", success_criteria: "page 2" }]
+  });
+  eq(out.status, "done", `reason: ${out.reason}`);
+  eq(client.seen.length, 3, "3 requests, not 4");
+  eq(clicks, 2, "both legs acted");
+  eq(out.subgoals[1].steps.length, 1, "the carried action is the second leg's step");
+  assert(client.seen[0].questions.next_operation, "a non-final leg asks the next leg's questions");
+  assert(client.seen[0].questions.next_operation.instructions.includes("second leg"), "naming the next goal");
+  assert(!client.seen[2].questions.next_operation, "the last leg has no next leg to ask about");
+});
+
+await check("a carried action that fails the gate is re-asked, never executed", async () => {
+  const browser = fakeBrowser({ rows: [row({ ref: "ref_1", role: "button", name: "Proceed" })] });
+  const client = fakeClient([
+    { operation: choice("DONE", 0.95), sensitive: noul(0), satisfied: noul(0.95),
+      next_operation: choice("CLICK", 0.99), next_target: choice("e1", 0.99), next_sensitive: noul(0.99), next_satisfied: notYet },
+    { operation: choice("BLOCKED", 0.9), sensitive: noul(0), satisfied: notYet }
+  ]);
+  const out = await navigate(browser.callTool, client, CFG, {
+    tabId: 1,
+    subgoals: [{ goal: "a", success_criteria: "x" }, { goal: "b", success_criteria: "y" }]
+  });
+  eq(client.seen.length, 2, "the second leg decided afresh");
+  eq(out.status, "blocked", "and its own answer stands");
+  assert(!browser.calls.some((c) => c.name === "computer"), "the refused carried click never ran");
+});
+
+await check("a next leg already satisfied on arrival finishes without a request", async () => {
+  const browser = fakeBrowser({ rows: [row({ ref: "ref_1", role: "button", name: "Go" })] });
+  const client = fakeClient([
+    { operation: choice("DONE", 0.95), sensitive: noul(0), satisfied: noul(0.95),
+      next_operation: choice("DONE", 0.95), next_sensitive: noul(0), next_satisfied: noul(0.97) }
+  ]);
+  const out = await navigate(browser.callTool, client, CFG, {
+    tabId: 1,
+    subgoals: [{ goal: "a", success_criteria: "x" }, { goal: "b", success_criteria: "y" }]
+  });
+  eq(out.status, "done", `reason: ${out.reason}`);
+  eq(client.seen.length, 1, "one request covered both legs");
+});
+
 await check("a failing leg stops the run and names itself, and later legs never run", async () => {
   const browser = fakeBrowser({ rows: [row({ ref: "ref_1", role: "button", name: "Delete everything" })] });
   const client = fakeClient([

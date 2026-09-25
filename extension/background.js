@@ -2027,12 +2027,21 @@ const toolHandlers = {
     // open Appearance menu sat over "Tools", and three clicks went into the
     // menu while the loop saw an unchanged page. Escape closes most popups;
     // if it does not, refuse with the culprit named instead of clicking.
+    //
+    // Hover popups ignore Escape. On Google Tasks the "Mark completed" tooltip
+    // of the checkbox just clicked stays up while the pointer rests there, and
+    // it sits over the next row's checkbox — so the second of two clicks down
+    // a list was refused. Moving the pointer off to the corner is what closes
+    // those, so try that before refusing.
     const done = [];
     const uncover = async () => {
       if ((await resolveRefToCoordinates(tabId, ref))?.covering == null) return;
       done.push(await run("computer", { action: "key", text: "Escape" }));
+      if ((await resolveRefToCoordinates(tabId, ref))?.covering == null) return;
+      done.push(await run("computer", { action: "hover", coordinate: [0, 0] }));
+      await sleep(150);
       const still = (await resolveRefToCoordinates(tabId, ref))?.covering;
-      if (still) throw new Error(`covered: ${ref} is covered by ${still}, and Escape did not clear it`);
+      if (still) throw new Error(`covered: ${ref} is covered by ${still}, and neither Escape nor moving the pointer away cleared it`);
     };
 
     try {

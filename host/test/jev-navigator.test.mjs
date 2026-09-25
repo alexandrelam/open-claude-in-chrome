@@ -15,7 +15,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-import { validate, buildRequest, navigate, decideOnce, normalizeSubgoals, navigatesAway } from "../jev/navigator.js";
+import { validate, buildRequest, navigate, decideOnce, normalizeSubgoals, navigatesAway, urlContradicts } from "../jev/navigator.js";
 import { resolveConfig } from "../jev/config.js";
 
 const results = [];
@@ -1099,6 +1099,63 @@ await check("when every leg is skipped the run reports the first failure, not pa
   });
   eq(out.status, "blocked", "status");
   assert(out.reason.startsWith("No subgoal finished"), `reason: ${out.reason}`);
+});
+
+// --- the URL is checked, not read ------------------------------------------------
+
+await check("urlContradicts checks key=value criteria against the real URL", async () => {
+  const c = "The revision history is shown filtered with tagfilter=mobile edit in the URL";
+  assert(urlContradicts(c, "https://w.test/index.php?title=N&action=history")?.includes("no tagfilter"), "missing param is a contradiction");
+  eq(urlContradicts(c, "https://w.test/index.php?title=N&tagfilter=mobile+edit&action=history"), null, "present param passes");
+  assert(urlContradicts("The URL contains action=info", "https://w.test/?action=history")?.includes("action=history"), "wrong value is a contradiction");
+  eq(urlContradicts("The revision history view is open", "https://w.test/"), null, "prose criteria are left to Jev");
+  eq(urlContradicts("a=b is selected in the form", "https://w.test/"), null, "key=value that is not about the URL is left alone");
+});
+
+await check("a satisfied answer the URL contradicts does not finish the leg", async () => {
+  // Real case: Jev said the tag filter was applied on a URL with no tagfilter,
+  // and the leg ended without clicking Show revisions.
+  const browser = fakeBrowser({
+    url: "https://w.test/index.php?title=N&action=history",
+    rows: [row({ ref: "ref_1", role: "button", name: "Show revisions" })],
+    onClick: (s) => { s.url = "https://w.test/index.php?title=N&tagfilter=mobile+edit&action=history"; }
+  });
+  const client = fakeClient([
+    { operation: choice("CLICK", 0.9), click_target: choice("e1", 0.9), sensitive: noul(0), satisfied: noul(0.95) },
+    { operation: choice("DONE", 0.9), sensitive: noul(0), satisfied: noul(0.95) }
+  ]);
+  const out = await navigate(browser.callTool, client, CFG, { tabId: 1, goal: "apply the filter", success_criteria: "tagfilter=mobile edit in the URL" });
+  eq(out.status, "done", `reason: ${out.reason}`);
+  eq(out.steps.length, 1, "it clicked instead of believing the first answer");
+  eq(out.final_url.includes("tagfilter"), true, "and the filter landed");
+});
+
+await check("a carried 'next leg already satisfied' the URL contradicts is not trusted", async () => {
+  const browser = fakeBrowser({
+    url: "https://w.test/index.php?action=history",
+    rows: [row({ ref: "ref_1", role: "button", name: "Expand" }), row({ ref: "ref_2", role: "button", name: "Show revisions" })],
+    onClick: (s, a) => {
+      if (a.ref === "ref_1") s.title = "expanded";
+      if (a.ref === "ref_2") s.url = "https://w.test/index.php?tagfilter=mobile+edit&action=history";
+    }
+  });
+  const client = fakeClient([
+    { operation: choice("CLICK", 0.9), click_target: choice("e1", 0.9), sensitive: noul(0), satisfied: notYet },
+    // Leg one is done, and the ride-along answers claim leg two is too —
+    // while also naming the click that would actually do it.
+    { operation: choice("DONE", 0.9), sensitive: noul(0), satisfied: noul(0.95),
+      next_operation: choice("CLICK", 0.9), next_click_target: choice("e2", 0.9), next_sensitive: noul(0), next_satisfied: noul(0.95) },
+    { operation: choice("DONE", 0.9), sensitive: noul(0), satisfied: noul(0.95) }
+  ]);
+  const out = await navigate(browser.callTool, client, CFG, {
+    tabId: 1,
+    subgoals: [
+      { goal: "expand the panel", success_criteria: "the panel is expanded" },
+      { goal: "show revisions", success_criteria: "tagfilter=mobile edit in the URL" }
+    ]
+  });
+  eq(out.status, "done", `reason: ${out.reason}`);
+  eq(out.subgoals[1].steps.length, 1, "the second leg clicked rather than finishing on arrival");
 });
 
 try {

@@ -175,7 +175,7 @@
   function regionNameFor(el) {
     const tag = el.tagName.toLowerCase();
     const role = (el.getAttribute("role") || "").toLowerCase();
-    if (!REGION_TAGS.has(tag) && !REGION_ROLES.has(role)) return null;
+    if (!REGION_TAGS.has(tag) && !REGION_ROLES.has(role)) return labelledByHeading(el);
 
     // aria-label / aria-labelledby first, which is how a well-built card names
     // itself; then the heading or legend a card usually leads with.
@@ -199,6 +199,23 @@
     }
     if (!name) return null;
     return name.replace(/\s+/g, " ").slice(0, 60);
+  }
+  // A plain container that names itself after a heading is a region too, even
+  // with no landmark tag or role. Google Tasks builds each list's column this
+  // way: a bare <div aria-labelledby> pointing at the list's <h2>. Without it,
+  // three columns each offering "Add a task" were three identical rows, and
+  // Jev clicked the first column's button six times while trying to add to
+  // the third. Only a heading counts as the label, so a div that merely
+  // borrows some text for its name does not start stamping sections.
+  function labelledByHeading(el) {
+    const ids = el.getAttribute("aria-labelledby");
+    if (!ids || el.getAttribute("role")) return null;
+    const heading = ids
+      .split(/\s+/)
+      .map((id) => document.getElementById(id))
+      .find((h) => h && (/^h[1-6]$/i.test(h.tagName) || h.getAttribute("role") === "heading"));
+    const name = heading?.textContent?.replace(/\s+/g, " ").trim();
+    return name ? name.slice(0, 60) : null;
   }
   const REGION_TAGS_SELECTOR = [...REGION_TAGS].join(",") +
     ",[role=region],[role=group],[role=form],[role=dialog],[role=tabpanel],[role=listitem],[role=row]";

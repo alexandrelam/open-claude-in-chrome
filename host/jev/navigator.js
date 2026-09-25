@@ -59,6 +59,38 @@ export function navigatesAway(href, currentUrl) {
   }
 }
 
+/**
+ * Does the page's URL contradict what the success criteria say it contains?
+ *
+ * `satisfied` is Jev's reading of the page, and the page it reads is controls
+ * plus a short excerpt, not the address bar. Asked whether "tagfilter=mobile
+ * edit in the URL" held, it said yes on a URL with no tagfilter at all, and
+ * the leg finished without clicking. When the criteria spell out key=value in
+ * the URL, that part can be checked exactly, so it is: a mismatch overrides
+ * the model. Anything the criteria say in prose is still left to Jev.
+ *
+ * Returns the first mismatch as a sentence, or null when nothing contradicts.
+ */
+export function urlContradicts(criteria, url) {
+  if (!criteria || !/\burl\b/i.test(criteria)) return null;
+  let params;
+  try {
+    params = new URL(url).searchParams;
+  } catch {
+    return null;
+  }
+  const loose = (v) => v.replace(/\+/g, " ").trim().toLowerCase();
+  for (const [, key, raw] of criteria.matchAll(/([A-Za-z_][\w.-]*)=("[^"]*"|'[^']*'|[^\s,;)]+)/g)) {
+    const want = loose(raw.replace(/^["']|["']$/g, ""));
+    const got = params.get(key);
+    // A prefix is enough: "tagfilter=mobile edit" parses as tagfilter=mobile.
+    if (got === null || !loose(got).startsWith(want)) {
+      return `the success criteria require ${key}=${want} in the URL, and the URL has ${got === null ? `no ${key}` : `${key}=${loose(got)}`}`;
+    }
+  }
+  return null;
+}
+
 function hostOf(url) {
   try {
     return new URL(url).hostname;
@@ -518,12 +550,13 @@ async function runSubgoal(callTool, client, cfg, sub, opts, ctx) {
       verdict = validate(answers, request.idMap, cfg, { allowSensitive, values });
     }
 
-    const satisfied = answers.satisfied?.noul ?? 0;
+    const contradiction = urlContradicts(successCriteria, obs.url);
+    const satisfied = contradiction ? 0 : answers.satisfied?.noul ?? 0;
 
     trace.step({
       i, subgoal: goal, url: obs.url, title: obs.title, carried: Boolean(carried),
       rows_offered: short.rows.length, rows_cut: short.cut, rows_offscreen: short.offscreen ?? null, truncated: obs.truncated,
-      satisfied, answers: carried ? null : answers,
+      satisfied, url_check: contradiction, answers: carried ? null : answers,
       verdict: { ok: verdict.ok, status: verdict.status ?? null, reason: verdict.reason ?? null },
       operation: verdict.operation, target_ref: verdict.row?.ref ?? null,
       jev_ms: jevMs, input_tokens: inputTokens
@@ -710,7 +743,7 @@ function carryFor(allAnswers, request, short, obs, next, cfg, allowSensitive) {
   const answers = answersFor(allAnswers, "next_");
   if (!answers.operation) return null;
   const verdict = validate(answers, request.idMap, cfg, { allowSensitive, values: next.values });
-  const satisfied = answers.satisfied?.noul ?? 0;
+  const satisfied = urlContradicts(next.successCriteria, obs.url) ? 0 : answers.satisfied?.noul ?? 0;
   if (!verdict.ok && !(satisfied > 0.5)) return null;
   return { obs, short, request, answers, verdict };
 }

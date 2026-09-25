@@ -1952,7 +1952,9 @@ const toolHandlers = {
   // fixed sleep.
   //   expect "navigation": until the tab's URL leaves fromUrl and the tab is
   //     complete (a pushState counts: the tab stays complete and only its URL
-  //     changes), bounded by timeoutMs; then a frame settle on the new page.
+  //     changes), bounded by timeoutMs; then a quiet settle on the new page.
+  //   expect "quiet": until the document is complete and its DOM has stopped
+  //     changing, <=1200 ms. For a page that has just loaded.
   //   expect "combobox": until the field's suggestions are visible, <=200 ms.
   //   expect "wait": timeoutMs of plain waiting, then a frame settle.
   //   anything else: two animation frames, <=50 ms.
@@ -1966,16 +1968,18 @@ const toolHandlers = {
     } else if (expect === "wait") {
       await sleep(Math.min(args.timeoutMs ?? 250, 5000));
     }
+    const quiet = expect === "quiet" || (expect === "navigation" && urlChanged);
+    const QUIET_CAP_MS = 1200;
     let frames = null;
     try {
       const resp = await withTimeout(
         sendContentMessage(tabId, {
           type: "jevSettle",
-          mode: expect === "combobox" ? "combobox" : "dom",
+          mode: quiet ? "quiet" : expect === "combobox" ? "combobox" : "dom",
           ref,
-          timeoutMs: expect === "combobox" ? 200 : 50,
+          timeoutMs: quiet ? QUIET_CAP_MS : expect === "combobox" ? 200 : 50,
         }),
-        1000,
+        QUIET_CAP_MS + 800,
         "jev_settle"
       );
       frames = resp?.result ?? null;
@@ -2019,10 +2023,22 @@ const toolHandlers = {
       if (!guard?.ok) return fail(`stale: ${guard?.reason ?? `${ref} could not be checked`}`);
     }
 
+    // A click on a covered target lands on whatever covers it. On Wikipedia an
+    // open Appearance menu sat over "Tools", and three clicks went into the
+    // menu while the loop saw an unchanged page. Escape closes most popups;
+    // if it does not, refuse with the culprit named instead of clicking.
     const done = [];
+    const uncover = async () => {
+      if ((await resolveRefToCoordinates(tabId, ref))?.covering == null) return;
+      done.push(await run("computer", { action: "key", text: "Escape" }));
+      const still = (await resolveRefToCoordinates(tabId, ref))?.covering;
+      if (still) throw new Error(`covered: ${ref} is covered by ${still}, and Escape did not clear it`);
+    };
+
     try {
       switch (operation) {
         case "CLICK":
+          await uncover();
           done.push(await run("computer", { action: "left_click", ref }));
           break;
         case "SELECT":
@@ -2035,6 +2051,7 @@ const toolHandlers = {
           // div) needs select-all-then-type.
           if (formField) done.push(await run("form_input", { ref, value }));
           else {
+            await uncover();
             done.push(await run("computer", { action: "triple_click", ref }));
             done.push(await run("computer", { action: "type", text: String(value) }));
           }
@@ -2043,6 +2060,7 @@ const toolHandlers = {
         case "PRESS_ENTER":
           // The key goes to whatever has focus, and form_input focuses
           // nothing, so the click is what puts the Enter in this field.
+          await uncover();
           done.push(await run("computer", { action: "left_click", ref }));
           done.push(await run("computer", { action: "key", text: "Return" }));
           break;

@@ -22,7 +22,8 @@ import {
   rowLabel,
   SUBMITTING_OPERATIONS,
   TARGET_HEADS,
-  targetHead
+  targetHead,
+  namesAgree
 } from "./actions.js";
 import { shortlistRows, renderRow } from "./shortlist.js";
 import { MAX_CHOICES } from "./config.js";
@@ -538,10 +539,12 @@ async function runSubgoal(callTool, client, cfg, sub, opts, ctx) {
     // operation once against the row that now carries that label.
     const actStart = Date.now();
     let acted = await runCalls(callTool, planToolCalls(verdict.operation, verdict.row, verdict.value, tabId, { jevTools: hasJevTools(callTool) }));
-    if (acted.error && /stale:|ref_\d+|not found|garbage collected/i.test(acted.error)) {
+    // A covered target is not stale: re-finding it by name returns the same
+    // covered element, so it goes straight back as the failure it is.
+    if (acted.error && !/covered:/.test(acted.error) && /stale:|ref_\d+|not found|garbage collected/i.test(acted.error)) {
       const { obs: retryObs } = await observeNow();
       const again = retryObs?.rows.find(
-        (r) => r.role === verdict.row.role && r.name === verdict.row.name
+        (r) => r.role === verdict.row.role && namesAgree(r.name, verdict.row.name)
       );
       if (again) {
         acted = await runCalls(callTool, planToolCalls(verdict.operation, again, verdict.value, tabId, { jevTools: hasJevTools(callTool) }));
@@ -724,6 +727,11 @@ export async function navigate(callTool, client, cfg, args) {
       reason = resultText(res);
       return finish();
     }
+    // Support for jev_settle is only learned from the first observation, so
+    // ask directly; an older extension refuses and there is nothing to wait on.
+    const t = Date.now();
+    await callTool("jev_settle", { tabId, expect: "quiet" });
+    ctx.settleMs += Date.now() - t;
   }
 
   const finalCheck = args.final_check ?? args.finalCheck ?? null;

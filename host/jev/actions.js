@@ -261,6 +261,16 @@ export function planToolCalls(operation, row, value, tabId, { jevTools = false }
   }
 }
 
+/**
+ * Do two accessible names denote the same control? Ignores bracketed hints,
+ * case and spacing, because pages rewrite those after load (MediaWiki turns
+ * "[t]" into "[ctrl-option-t]"). Mirrors looseName in extension/content.js.
+ */
+export function namesAgree(a, b) {
+  const loose = (s) => String(s || "").replace(/\[[^\]]*\]/g, " ").replace(/\s+/g, " ").trim().toLowerCase();
+  return loose(a) === loose(b);
+}
+
 /** A short, stable label for a row — used in traces and in the step log. */
 export function rowLabel(row) {
   if (!row) return "";

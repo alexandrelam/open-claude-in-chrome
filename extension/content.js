@@ -380,16 +380,38 @@
   // instead for its suggestions to become visible (same bound), so the next
   // decision is not made against a popup that has not opened yet. Ported from
   // jev-ultrafast's post-input wait.
+  //
+  // mode "quiet" is for a page that just loaded: the load event fires before
+  // the page's own scripts finish building it. On Wikipedia the Appearance
+  // radios do not exist yet and link titles are rewritten a moment later, so
+  // a decision taken at load chose "Hide Appearance" over a Dark radio it
+  // could not see. Resolve once the document is complete and QUIET_MS pass
+  // with no DOM mutation, bounded by timeoutMs for pages that never stop.
+  const QUIET_MS = 150;
   function settleFrames(mode, ref, timeoutMs) {
     return new Promise((resolve) => {
       let frames = 0;
       let done = false;
+      let observer = null;
+      let quietTimer = null;
       const finish = (reason) => {
         if (done) return;
         done = true;
+        observer?.disconnect();
+        clearTimeout(quietTimer);
         resolve(reason);
       };
       setTimeout(() => finish("timeout"), timeoutMs);
+      if (mode === "quiet") {
+        const arm = () => {
+          clearTimeout(quietTimer);
+          quietTimer = setTimeout(() => (document.readyState === "complete" ? finish("quiet") : arm()), QUIET_MS);
+        };
+        observer = new MutationObserver(arm);
+        observer.observe(document.documentElement, { subtree: true, childList: true, attributes: true, characterData: true });
+        arm();
+        return;
+      }
       const field = mode === "combobox" && ref ? resolveRef(ref) : null;
       const optionsVisible = () => {
         const ids = (field?.getAttribute("aria-controls") || field?.getAttribute("aria-owns") || "")
@@ -416,6 +438,12 @@
   // before acting, because a Jev round trip sits between the observation and
   // the action and the page can change under it. A ref that now names a
   // different, hidden or disabled element is refused instead of clicked.
+  //
+  // Names are compared without bracketed hints, case or spacing: MediaWiki
+  // rewrites "[t]" to "[ctrl-option-t]" in link titles after load, and an exact
+  // comparison refused the same link as stale. Keep in step with namesAgree in
+  // host/jev/actions.js.
+  const looseName = (s) => String(s || "").replace(/\[[^\]]*\]/g, " ").replace(/\s+/g, " ").trim().toLowerCase();
   function jevGuard(ref, expect = {}) {
     const el = resolveRef(ref);
     if (!el || !el.isConnected) return { ok: false, reason: `${ref} is no longer on the page` };
@@ -424,7 +452,7 @@
     const role = getRole(el) || "";
     const name = getAccessibleName(el).substring(0, 100).replace(/\s+/g, " ").trim();
     if (expect.role !== undefined && expect.role !== role) return { ok: false, reason: `${ref} is now a ${role || "element"}, not a ${expect.role}` };
-    if (expect.name !== undefined && expect.name !== name) return { ok: false, reason: `${ref} is now named "${name}", not "${expect.name}"` };
+    if (expect.name !== undefined && looseName(expect.name) !== looseName(name)) return { ok: false, reason: `${ref} is now named "${name}", not "${expect.name}"` };
     return { ok: true };
   }
 
@@ -763,7 +791,11 @@
     let covering = null;
     if (x >= 0 && y >= 0 && x < window.innerWidth && y < window.innerHeight) {
       const at = document.elementFromPoint(x, y);
-      if (at && at !== el && !el.contains(at) && !at.contains(el)) {
+      // An element's own <label> sitting over it forwards the click, so it is
+      // not in the way. Styled checkboxes are built exactly like that.
+      const label = at?.closest?.("label");
+      const ownLabel = label && (label.control === el || label.contains(el));
+      if (at && at !== el && !el.contains(at) && !at.contains(el) && !ownLabel) {
         covering = describeBrief(at);
       }
     }

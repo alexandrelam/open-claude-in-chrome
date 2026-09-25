@@ -227,6 +227,7 @@ function fakeBrowser({ url = "https://app.test/a", title = "A", rows = [], onCli
       case "jev_act":
         if (legacy) return text("Error: Unknown tool: jev_act");
         if (state.staleRefs?.has(args.ref)) return text(`Error: stale: ${args.ref} is no longer on the page`);
+        if (state.coveredRefs?.has(args.ref)) return text(`Error: covered: ${args.ref} is covered by <div.menu>, and Escape did not clear it`);
         if (onClick) onClick(state, args);
         return text("ok");
       case "computer":
@@ -508,6 +509,48 @@ await check("a target that went stale is re-found by role and name, then acted o
   const out = await navigate(callTool, client, CFG, { tabId: 1, goal: "apply", success_criteria: "applied" });
   eq(out.status, "done", `reason: ${out.reason}`);
   eq(acts, 2, "refused once, then done");
+});
+
+await check("a stale target whose name only lost its access-key hint is still re-found", async () => {
+  // MediaWiki rewrites "[t]" to "[ctrl-option-t]" after load. The retry used
+  // to match names exactly, so the renamed link was never found again.
+  const browser = fakeBrowser({
+    rows: [row({ ref: "ref_1", role: "link", name: "Discuss improvements [t]" })],
+    onClick: (s) => { s.url = "https://app.test/talk"; }
+  });
+  browser.state.staleRefs = new Set(["ref_1"]);
+  const inner = browser.callTool;
+  let acts = 0;
+  const callTool = async (name, args) => {
+    if (name === "jev_act") acts++;
+    const r = await inner(name, args);
+    if (name === "jev_act" && acts === 1) browser.state.rows = [row({ ref: "ref_9", role: "link", name: "Discuss improvements [ctrl-option-t]" })];
+    return r;
+  };
+  const client = fakeClient([
+    { operation: choice("CLICK", 0.95), click_target: choice("e1", 0.95), sensitive: noul(0), satisfied: notYet },
+    { operation: choice("DONE", 0.95), sensitive: noul(0), satisfied: noul(0.95) }
+  ]);
+  const out = await navigate(callTool, client, CFG, { tabId: 1, goal: "open talk", success_criteria: "talk page" });
+  eq(out.status, "done", `reason: ${out.reason}`);
+  eq(acts, 2, "refused once, then retried on the renamed link");
+});
+
+await check("a covered target is handed back, not retried", async () => {
+  // Re-finding a covered control by name returns the same covered control.
+  const browser = fakeBrowser({ rows: [row({ ref: "ref_1", role: "button", name: "Tools" })] });
+  browser.state.coveredRefs = new Set(["ref_1"]);
+  let acts = 0;
+  const inner = browser.callTool;
+  const callTool = async (name, args) => {
+    if (name === "jev_act") acts++;
+    return inner(name, args);
+  };
+  const client = fakeClient([{ operation: choice("CLICK", 0.95), click_target: choice("e1", 0.95), sensitive: noul(0), satisfied: notYet }]);
+  const out = await navigate(callTool, client, CFG, { tabId: 1, goal: "open tools", success_criteria: "tools open" });
+  eq(out.status, "needs_help", "status");
+  assert(out.reason.includes("covered"), `reason: ${out.reason}`);
+  eq(acts, 1, "one attempt only");
 });
 
 await check("jev_decide returns a short distribution in one id space", async () => {

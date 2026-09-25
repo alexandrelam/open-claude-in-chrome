@@ -95,8 +95,14 @@ export function isCompatible(operation, row) {
       // it stranded a run that had typed a query and wanted to open the
       // autocomplete list.
       return CLICK_ROLES.has(role) || TEXT_ROLES.has(role) || Boolean(row.href) || Boolean(row.type);
-    case "PRESS_ENTER":
     case "TYPE_AND_SUBMIT":
+      // Not into an autocomplete combobox. Its Enter belongs to the suggestion
+      // menu, not to a form: typing "mobile edit" into a tag filter and
+      // submitting blind landed on a revision diff page. Those need TYPE_TEXT,
+      // then a decision that picks from the list that opens.
+      if (role === "combobox") return false;
+      return TEXT_ROLES.has(role) || Boolean(row.type);
+    case "PRESS_ENTER":
       return TEXT_ROLES.has(role) || Boolean(row.type);
     case "TYPE_TEXT":
       return TEXT_ROLES.has(role) || Boolean(row.type);

@@ -28,6 +28,27 @@ import { BudgetExceeded } from "./client.js";
 
 const NONE = "NONE";
 
+/**
+ * Will activating this href replace the document?
+ *
+ * A same-page fragment does not navigate; anything else does. Used to decide
+ * what "the action landed" means for a CLICK — see the settle check below.
+ */
+export function navigatesAway(href, currentUrl) {
+  if (!href) return false;
+  try {
+    const target = new URL(href, currentUrl);
+    const here = new URL(currentUrl);
+    return (
+      target.origin !== here.origin ||
+      target.pathname !== here.pathname ||
+      target.search !== here.search
+    );
+  } catch {
+    return false;
+  }
+}
+
 function hostOf(url) {
   try {
     return new URL(url).hostname;
@@ -268,6 +289,25 @@ async function observeOrFail(callTool, tabId, cfg) {
   return { obs, failure: null };
 }
 
+function topN(probabilities, n) {
+  return Object.entries(probabilities ?? {})
+    .filter(([, p]) => p > 0)
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, n)
+    .map(([k, p]) => ({ choice: k, p: Number(p.toFixed(3)) }));
+}
+
+function topTargets(probabilities, idMap, n) {
+  return Object.entries(probabilities ?? {})
+    .filter(([, p]) => p > 0)
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, n)
+    .map(([id, p]) => {
+      const row = idMap.get(id);
+      return { ref: row?.ref ?? id, label: rowLabel(row), p: Number(p.toFixed(3)) };
+    });
+}
+
 /** One observation + one decision, with no action. Backs the jev_decide tool. */
 export async function decideOnce(callTool, client, cfg, args) {
   const { tabId, goal, success_criteria: successCriteria, values, allow_sensitive } = args;
@@ -291,9 +331,13 @@ export async function decideOnce(callTool, client, cfg, args) {
     confidence: verdict.confidence ?? answers.operation?.confidence ?? null,
     sensitive_probability: answers.sensitive?.noul ?? null,
     reason: verdict.ok ? null : verdict.reason,
+    // Top few only, and in refs — the same id space as target_ref above.
+    // The full target distribution is ~240 entries of almost entirely zero
+    // (about 6KB), keyed eN while target_ref is ref_N, so the two halves of the
+    // same answer could not be lined up.
     probabilities: {
-      operation: answers.operation?.probabilities ?? {},
-      target: answers.target?.probabilities ?? {}
+      operation: topN(answers.operation?.probabilities, 5),
+      target: topTargets(answers.target?.probabilities, idMap, 5)
     },
     rows_offered: short.rows.length,
     rows_cut: short.cut,
@@ -490,10 +534,22 @@ async function runSubgoal(callTool, client, cfg, sub, opts, ctx) {
     // putting text in the field, so the signature can no longer tell us whether
     // the navigation landed. Measured: the submit completes around +300ms, and
     // reading at +0ms caught the old page and looked like a no-op.
+    // A click on a link that leaves the page is judged on the URL too.
+    //
+    // Signature change is the wrong test for it: clicking a link inside a
+    // dropdown CLOSES the dropdown, which changes the signature immediately
+    // while the navigation is still in flight. The loop then decided on a page
+    // that was about to be replaced — twice in one audited run — and the next
+    // action could have landed on the incoming page instead.
+    //
+    // A click with no href, or one that only moves to a fragment, does not
+    // navigate, so the signature check stays right for it.
+    const expectsNavigation =
+      SUBMITTING_OPERATIONS.has(verdict.operation) ||
+      (verdict.operation === "CLICK" && navigatesAway(verdict.row?.href, obs.url));
+
     const settled = (o) =>
-      SUBMITTING_OPERATIONS.has(verdict.operation)
-        ? o.url !== beforeUrl
-        : observationSignature(o) !== before;
+      expectsNavigation ? o.url !== beforeUrl : observationSignature(o) !== before;
 
     let { obs: after, failure: afterFail } = await observeNow();
     for (let settle = 0; settle < 4 && !afterFail && !settled(after); settle++) {
@@ -549,6 +605,14 @@ export async function navigate(callTool, client, cfg, args) {
 
   const finish = () => {
     const obs = ctx.obs;
+    // A truncated observation is a real possible cause of "nothing here can
+    // help": read_page hit its own character cap, so rows were dropped before
+    // the prefilter could even rank them. Saying so turns a confidently wrong
+    // answer into a legible one — an Octopus article yields 1,412 rows and
+    // truncates, and this was only ever recorded in the trace.
+    if (status !== "done" && obs?.truncated) {
+      reason = `${reason ?? "Stopped."} NOTE: the page was too large to read in full (read_page truncated it), so some controls were never observed and could not be chosen. Try a narrower start_url, or scroll to the relevant part first.`;
+    }
     const out = {
       status,
       steps: allSteps,

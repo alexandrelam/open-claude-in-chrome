@@ -193,11 +193,18 @@ export function isToolError(result) {
  * Making the excerpt longer is not the fix — measured, that degrades the action
  * decision by diluting it. Making it non-redundant is.
  */
-export function dropElementEcho(text, rows) {
+export function dropElementEcho(text, rows, title = "") {
+  // Never strip a word the page is ABOUT. On Wikipedia the subject is also a
+  // link name, so filtering echoes turned the Octopus article's excerpt into
+  // ": Revision history" — losing the one word that says where you are.
+  const subject = new Set(
+    title.toLowerCase().split(/[^a-z0-9]+/).filter((w) => w.length >= 3)
+  );
   const names = [...new Set(
     rows
       .map((r) => (r.name || "").trim())
       .filter((n) => n.length >= 3 && n.length <= 30)
+      .filter((n) => !subject.has(n.toLowerCase()))
   )].sort((a, b) => b.length - a.length); // longest first, so "View history" wins over "View"
   if (!names.length) return text;
 
@@ -252,7 +259,7 @@ export function parseTabContext(text, tabId) {
 export async function observe(
   callTool,
   tabId,
-  { excerptChars = 300, maxChars = 200_000, depth = 30 } = {}
+  { excerptChars = 300, maxChars = 400_000, depth = 30 } = {}
 ) {
   const [pageRes, textRes, ctxRes] = await Promise.all([
     // read_page truncates at 50k characters by default, which a large article
@@ -297,7 +304,7 @@ export async function observe(
   const usable = usableRows(rows);
   const excerpt = isToolError(textRes)
     ? ""
-    : dropElementEcho(stripTextHeader(resultText(textRes)), usable)
+    : dropElementEcho(stripTextHeader(resultText(textRes)), usable, ctx.title)
         .replace(/\s+/g, " ")
         .trim()
         .slice(0, excerptChars);

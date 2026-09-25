@@ -13,6 +13,7 @@
 // Run: node host/test/jev-parse.test.mjs
 
 import {
+  dropElementEcho,
   parseLine,
   parsePage,
   usableRows,
@@ -145,6 +146,21 @@ check("rows that are genuinely identical are still collapsed", () => {
   // probability mass and depress confidence below the gate for no reason.
   const same = { role: "button", name: "Paragraph", section: "HPI", href: "", type: "", value: "", options: null, indent: 4 };
   eq(usableRows([{ ...same, ref: "ref_1" }, { ...same, ref: "ref_2" }]).length, 1, "collapsed");
+});
+
+check("the excerpt keeps the page's subject even when it is also a link", () => {
+  // dropElementEcho strips text duplicating element names, so the excerpt can
+  // carry what the row list cannot. On Wikipedia the article's subject is also
+  // a link name, and stripping it turned the excerpt into ": Revision history"
+  // — losing the one word that says where you are.
+  const rows = [
+    { name: "Octopus", role: "link", section: "" },
+    { name: "View history", role: "link", section: "" }
+  ];
+  const text = "Octopus: Revision history View history Octopus is a soft-bodied mollusc.";
+  const out = dropElementEcho(text, rows, "Octopus: Revision history - Wikipedia");
+  assert(out.includes("Octopus"), `subject must survive: ${out}`);
+  assert(!out.includes("View history"), `ordinary echo is still removed: ${out}`);
 });
 
 check("non-element lines are skipped, not guessed at", () => {

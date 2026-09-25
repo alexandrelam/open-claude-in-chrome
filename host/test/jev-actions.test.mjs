@@ -96,6 +96,16 @@ await check("a text field can be clicked, not only typed into", async () => {
   assert(isCompatible("CLICK", row({ type: "text" })), "plain input is clickable");
 });
 
+await check("TYPE_AND_SUBMIT is refused on an autocomplete combobox", async () => {
+  // Its Enter belongs to the suggestion menu, not to a form. Typing
+  // "mobile edit" into a tag filter and submitting blind landed on a revision
+  // diff page. A combobox needs TYPE_TEXT, then a decision that picks from the
+  // list that opens.
+  assert(!isCompatible("TYPE_AND_SUBMIT", row({ role: "combobox" })), "refused on combobox");
+  assert(isCompatible("TYPE_TEXT", row({ role: "combobox" })), "but typing into it is still fine");
+  assert(isCompatible("TYPE_AND_SUBMIT", row({ role: "searchbox", type: "search" })), "and a plain search box still works");
+});
+
 await check("targetless operations need no row", async () => {
   for (const op of ["SCROLL_UP", "SCROLL_DOWN", "WAIT", "DONE", "BLOCKED"]) {
     assert(isCompatible(op, null), `${op} should not require a target`);

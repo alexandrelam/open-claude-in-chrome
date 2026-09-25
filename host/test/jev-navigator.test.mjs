@@ -15,7 +15,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-import { validate, buildRequest, navigate, decideOnce, normalizeSubgoals } from "../jev/navigator.js";
+import { validate, buildRequest, navigate, decideOnce, normalizeSubgoals, navigatesAway } from "../jev/navigator.js";
 import { resolveConfig } from "../jev/config.js";
 
 const results = [];
@@ -316,6 +316,88 @@ await check("an allowlist permits its own subdomains and refuses everything else
   const noClient = fakeClient([{ operation: choice("CLICK", 0.9), target: choice("e1", 0.9), sensitive: noul(0), satisfied: notYet }]);
   await navigate(no.callTool, noClient, cfg, { tabId: 1, goal: "g", success_criteria: "s" });
   eq(noClient.seen.length, 0, "an off-list domain never reached the provider");
+});
+
+await check("navigatesAway distinguishes a real navigation from an anchor", async () => {
+  const here = "https://x.test/wiki/Cephalopod";
+  assert(navigatesAway("https://x.test/wiki/Nautilus", here), "different path");
+  assert(navigatesAway("https://other.test/a", here), "different origin");
+  assert(navigatesAway("/wiki/Nautilus", here), "relative path");
+  assert(!navigatesAway("#References", here), "same-page fragment does not navigate");
+  assert(!navigatesAway("", here), "no href");
+});
+
+await check("a link click waits for its navigation, not for the dropdown closing", async () => {
+  // The bug: clicking a link inside a dropdown closes the dropdown, which
+  // changes the signature at once while the navigation is still in flight. The
+  // loop then decided on a page that was about to be replaced — twice in one
+  // audited run — and the next action could have landed on the incoming page.
+  let pending = 0;
+  const browser = fakeBrowser({
+    url: "https://app.test/talk",
+    rows: [
+      row({ ref: "ref_1", role: "button", name: "Tools" }),
+      row({ ref: "ref_2", role: "link", name: "What links here", href: "https://app.test/whatlinkshere" })
+    ],
+    onClick: (st) => {
+      // The dropdown closes immediately; the navigation takes a couple of reads.
+      st.rows = [row({ ref: "ref_1", role: "button", name: "Tools" })];
+      pending = 2;
+    }
+  });
+  const inner = browser.callTool;
+  const callTool = async (name, args) => {
+    if (name === "tabs_context_mcp" && pending > 0 && --pending === 0) {
+      browser.state.url = "https://app.test/whatlinkshere";
+      browser.state.title = "What links here";
+    }
+    return inner(name, args);
+  };
+  const client = fakeClient([
+    { operation: choice("CLICK", 0.95), target: choice("e2", 0.95), sensitive: noul(0), satisfied: notYet },
+    { operation: choice("CLICK", 0.95), target: choice("e1", 0.95), sensitive: noul(0), satisfied: noul(0.95) }
+  ]);
+  const out = await navigate(callTool, client, CFG, { tabId: 1, goal: "open what links here", success_criteria: "the page is open" });
+  eq(out.status, "done", `reason: ${out.reason}`);
+  eq(out.final_url, "https://app.test/whatlinkshere", "waited for the navigation");
+  eq(out.steps.length, 1, "no wasted decision on the outgoing page");
+});
+
+await check("a truncated observation is named when the run does not finish", async () => {
+  // read_page has its own character cap, and an Octopus article blows past it
+  // at 1,412 rows. Rows lost there never reach the prefilter, so "nothing here
+  // can help" is the wrong conclusion and has to say why it might be wrong.
+  const browser = fakeBrowser({ rows: [row({ ref: "ref_1", role: "button", name: "Go" })] });
+  const inner = browser.callTool;
+  const callTool = async (name, args) => {
+    const r = await inner(name, args);
+    if (name === "read_page") r.content[0].text += "\n... (truncated)";
+    return r;
+  };
+  const client = fakeClient([{ operation: choice("BLOCKED", 0.9), sensitive: noul(0), satisfied: notYet }]);
+  const out = await navigate(callTool, client, CFG, { tabId: 1, goal: "g", success_criteria: "s" });
+  eq(out.status, "blocked", "status");
+  assert(out.reason.includes("too large to read in full"), `reason should name truncation: ${out.reason}`);
+});
+
+await check("jev_decide returns a short distribution in one id space", async () => {
+  // It used to return ~240 entries of almost entirely zero, keyed eN while
+  // target_ref was ref_N — so the two halves of the same answer could not be
+  // lined up.
+  const rows = Array.from({ length: 12 }, (_, i) => row({ ref: `ref_${i}`, role: "button", name: `B${i}` }));
+  const browser = fakeBrowser({ rows });
+  const probs = {};
+  rows.forEach((_, i) => { probs[`e${i + 1}`] = i === 0 ? 0.7 : 0.3 / 11; });
+  const client = fakeClient([{
+    operation: choice("CLICK", 0.9),
+    target: { type: "choice", choice: "e1", confidence: 0.7, probabilities: probs },
+    sensitive: noul(0.02), satisfied: notYet
+  }]);
+  const out = await decideOnce(browser.callTool, client, CFG, { tabId: 1, goal: "g", success_criteria: "s" });
+  assert(out.probabilities.target.length <= 5, `top 5 only, got ${out.probabilities.target.length}`);
+  eq(out.probabilities.target[0].ref, "ref_0", "keyed by ref, same space as target_ref");
+  eq(out.probabilities.target[0].ref, out.target_ref, "and it agrees with the chosen target");
+  assert(out.probabilities.target[0].label, "carries a readable label");
 });
 
 await check("a submit is judged on the URL, not on the text it just typed", async () => {

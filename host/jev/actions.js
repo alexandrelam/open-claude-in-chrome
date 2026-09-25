@@ -188,11 +188,27 @@ export function looksSensitive(row) {
   return SENSITIVE_WORDS.some((w) => hay.includes(w));
 }
 
+const JEV_ACT_OPERATIONS = new Set([
+  "CLICK", "SELECT", "TYPE_TEXT", "TYPE_AND_SUBMIT", "PRESS_ENTER", "SCROLL_DOWN", "SCROLL_UP"
+]);
+
 /**
  * Turn a validated (operation, row, value) into the tool calls that perform it.
  * Returns a list because typing into a rich editor needs two.
  */
 export function planToolCalls(operation, row, value, tabId, { jevTools = false } = {}) {
+  // One jev_act call per operation when the extension has it: one round trip
+  // instead of up to three, and the target is checked before it is touched.
+  if (jevTools && JEV_ACT_OPERATIONS.has(operation)) {
+    const call = { tabId, operation };
+    if (row) {
+      call.ref = row.ref;
+      call.expect = { role: row.role || "", name: row.name || "" };
+      call.formField = Boolean(row.type);
+    }
+    if (value !== undefined) call.value = value;
+    return [["jev_act", call]];
+  }
   switch (operation) {
     case "CLICK":
       return [["computer", { action: "left_click", ref: row.ref, tabId }]];
@@ -223,13 +239,16 @@ export function planToolCalls(operation, row, value, tabId, { jevTools = false }
         ["computer", { action: "type", text: value, tabId }]
       ];
     }
+    // The computer tool's scroll needs a point to scroll at, and without one
+    // it declined without an "Error:" prefix, so these used to be silent
+    // no-ops. Any point inside the viewport scrolls the page.
     case "SCROLL_DOWN":
       return [
-        ["computer", { action: "scroll", scroll_direction: "down", scroll_amount: 5, tabId }]
+        ["computer", { action: "scroll", coordinate: [400, 300], scroll_direction: "down", scroll_amount: 5, tabId }]
       ];
     case "SCROLL_UP":
       return [
-        ["computer", { action: "scroll", scroll_direction: "up", scroll_amount: 5, tabId }]
+        ["computer", { action: "scroll", coordinate: [400, 300], scroll_direction: "up", scroll_amount: 5, tabId }]
       ];
     case "WAIT":
       // A quarter second and then two frames, as jev-ultrafast does, rather

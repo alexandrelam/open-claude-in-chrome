@@ -396,6 +396,30 @@ await check("scrolls are offered only in a direction the page can move", async (
   assert(unknown.includes("SCROLL_DOWN") && unknown.includes("SCROLL_UP"), "no scroll info: both, as before");
 });
 
+// --- jev_act plans -----------------------------------------------------------
+
+await check("with the Jev tools, every targeted operation is one jev_act call", async () => {
+  const field = row({ ref: "ref_4", role: "searchbox", name: "Search", type: "search" });
+  const calls = planToolCalls("TYPE_AND_SUBMIT", field, "Nautilus", 1, { jevTools: true });
+  eq(calls.length, 1, "one call, not three");
+  const [name, args] = calls[0];
+  eq(name, "jev_act", "tool");
+  eq(args.operation, "TYPE_AND_SUBMIT", "operation");
+  eq(args.ref, "ref_4", "ref");
+  eq(args.value, "Nautilus", "value");
+  eq(args.formField, true, "a real form control, so form_input");
+  eq(JSON.stringify(args.expect), JSON.stringify({ role: "searchbox", name: "Search" }), "what the target must still be");
+  eq(planToolCalls("CLICK", row({ ref: "ref_1", role: "link", name: "x", href: "h" }), undefined, 1, { jevTools: true })[0][0], "jev_act", "CLICK");
+  eq(planToolCalls("SCROLL_DOWN", null, undefined, 1, { jevTools: true })[0][0], "jev_act", "SCROLL_DOWN");
+});
+
+await check("without them, scrolls name a point, or the computer tool declines", async () => {
+  // It declined without an "Error:" prefix, so SCROLL used to be a silent no-op.
+  const [[name, args]] = planToolCalls("SCROLL_DOWN", null, undefined, 1);
+  eq(name, "computer", "tool");
+  assert(Array.isArray(args.coordinate), "coordinate supplied");
+});
+
 const failed = results.filter((r) => !r.ok);
 console.log(
   `\n${results.length - failed.length}/${results.length} passed` +

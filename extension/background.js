@@ -1986,6 +1986,89 @@ const toolHandlers = {
     return { content: [{ type: "text", text: JSON.stringify({ urlChanged, frames, ms: Date.now() - t0 }) }] };
   },
 
+  // Hidden: carry out one Jev operation in a single round trip from the host.
+  // TYPE_AND_SUBMIT was three host->extension calls, PRESS_ENTER two. Each
+  // step goes through the ordinary computer/form_input handlers, so clicks and
+  // typing behave exactly as they do for Claude (humanize, hit notes, Brave).
+  //
+  // Two things the separate calls could not do:
+  //   - check the target first: a Jev round trip sits between observing the
+  //     row and acting on it, and a ref that now names a different, hidden or
+  //     disabled element is refused rather than clicked;
+  //   - treat the handlers' soft failures ("Could not resolve ref ...") as
+  //     failures. They carry no "Error:" prefix, so the loop used to count a
+  //     click on a dead ref, or a scroll with no coordinate, as done.
+  async jev_act(args) {
+    const { tabId, operation, ref, value, formField, expect } = args;
+    if (!(await isInGroup(tabId))) return { content: [{ type: "text", text: `Error: Tab ${tabId} is not in the MCP group.` }] };
+    const fail = (text) => ({ content: [{ type: "text", text: `Error: ${text}` }] });
+    const run = async (handler, a) => {
+      const res = await toolHandlers[handler]({ ...a, tabId });
+      const text = res?.content?.find((c) => c.type === "text")?.text || "";
+      if (/^(Error|Could not|Invalid|Tab \d+ is not)|is required/.test(text)) throw new Error(text.replace(/^Error:\s*/, ""));
+      return text;
+    };
+
+    if (ref) {
+      let guard;
+      try {
+        guard = (await sendContentMessage(tabId, { type: "jevGuard", ref, expect }))?.result;
+      } catch (e) {
+        return fail(`stale: could not check ${ref}: ${e?.message ?? e}`);
+      }
+      if (!guard?.ok) return fail(`stale: ${guard?.reason ?? `${ref} could not be checked`}`);
+    }
+
+    const done = [];
+    try {
+      switch (operation) {
+        case "CLICK":
+          done.push(await run("computer", { action: "left_click", ref }));
+          break;
+        case "SELECT":
+          done.push(await run("form_input", { ref, value }));
+          break;
+        case "TYPE_TEXT":
+        case "TYPE_AND_SUBMIT":
+          // form_input sets a real form control's value and fires the events
+          // frameworks listen for; anything else (contenteditable, a styled
+          // div) needs select-all-then-type.
+          if (formField) done.push(await run("form_input", { ref, value }));
+          else {
+            done.push(await run("computer", { action: "triple_click", ref }));
+            done.push(await run("computer", { action: "type", text: String(value) }));
+          }
+          if (operation === "TYPE_TEXT") break;
+        // fall through: submit
+        case "PRESS_ENTER":
+          // The key goes to whatever has focus, and form_input focuses
+          // nothing, so the click is what puts the Enter in this field.
+          done.push(await run("computer", { action: "left_click", ref }));
+          done.push(await run("computer", { action: "key", text: "Return" }));
+          break;
+        case "SCROLL_DOWN":
+        case "SCROLL_UP": {
+          // One wheel event at the viewport's centre, without the computer
+          // tool's confirmation screenshot, which the loop never looks at.
+          await ensureAttached(tabId);
+          const vp = await cdp(tabId, "Runtime.evaluate", { expression: "[innerWidth, innerHeight]", returnByValue: true });
+          const [w, h] = vp?.result?.value || [800, 600];
+          await sendMouseEvent(tabId, {
+            type: "mouseWheel", x: Math.round(w / 2), y: Math.round(h / 2),
+            deltaX: 0, deltaY: operation === "SCROLL_DOWN" ? 500 : -500, modifiers: 0,
+          });
+          done.push(`Scrolled ${operation === "SCROLL_DOWN" ? "down" : "up"}`);
+          break;
+        }
+        default:
+          return fail(`jev_act does not perform ${operation}`);
+      }
+    } catch (e) {
+      return fail(e?.message ?? String(e));
+    }
+    return { content: [{ type: "text", text: done.join(" / ") }] };
+  },
+
   async get_page_text(args) {
     const { tabId } = args;
     if (!(await isInGroup(tabId))) return { content: [{ type: "text", text: `Tab ${tabId} is not in the MCP group.` }] };

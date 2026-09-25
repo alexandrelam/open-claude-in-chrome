@@ -538,7 +538,7 @@ async function runSubgoal(callTool, client, cfg, sub, opts, ctx) {
     // operation once against the row that now carries that label.
     const actStart = Date.now();
     let acted = await runCalls(callTool, planToolCalls(verdict.operation, verdict.row, verdict.value, tabId, { jevTools: hasJevTools(callTool) }));
-    if (acted.error && /ref_\d+|not found|garbage collected/i.test(acted.error)) {
+    if (acted.error && /stale:|ref_\d+|not found|garbage collected/i.test(acted.error)) {
       const { obs: retryObs } = await observeNow();
       const again = retryObs?.rows.find(
         (r) => r.role === verdict.row.role && r.name === verdict.row.name

@@ -224,6 +224,11 @@ function fakeBrowser({ url = "https://app.test/a", title = "A", rows = [], onCli
         return text("page body text");
       case "tabs_context_mcp":
         return text(JSON.stringify({ availableTabs: [{ tabId: 1, title: state.title, url: state.url }], tabGroupId: 1 }) + "\n\nprose\n");
+      case "jev_act":
+        if (legacy) return text("Error: Unknown tool: jev_act");
+        if (state.staleRefs?.has(args.ref)) return text(`Error: stale: ${args.ref} is no longer on the page`);
+        if (onClick) onClick(state, args);
+        return text("ok");
       case "computer":
       case "form_input":
         if (onClick) onClick(state, args);
@@ -291,7 +296,7 @@ await check("the sensitive gate stops BEFORE the browser is touched", async () =
   const client = fakeClient([{ operation: choice("CLICK", 0.99), click_target: choice("e1", 0.99), sensitive: noul(0.99), satisfied: notYet }]);
   const out = await navigate(browser.callTool, client, CFG, { tabId: 1, goal: "clean up", success_criteria: "done" });
   eq(out.status, "needs_help", "status");
-  assert(!browser.calls.some((c) => c.name === "computer" || c.name === "form_input"), "an action was performed despite the gate");
+  assert(!browser.calls.some((c) => ["computer", "form_input", "jev_act"].includes(c.name)), "an action was performed despite the gate");
 });
 
 await check("needs_value stops without acting and says what is missing", async () => {
@@ -300,7 +305,7 @@ await check("needs_value stops without acting and says what is missing", async (
   const out = await navigate(browser.callTool, client, CFG, { tabId: 1, goal: "search", success_criteria: "results", values: { unrelated: "x" } });
   eq(out.status, "needs_value", "status");
   assert(out.reason.includes("Search"), "names the field");
-  assert(!browser.calls.some((c) => c.name === "form_input"), "nothing was typed");
+  assert(!browser.calls.some((c) => c.name === "form_input" || c.name === "jev_act"), "nothing was typed");
 });
 
 await check("a blocked domain sends nothing to the provider at all", async () => {
@@ -477,6 +482,32 @@ await check("WAIT is a quarter second, or the old second on an old extension", a
     if (legacy) eq(waits[0]?.name, "computer", "old extension: computer wait");
     else eq(`${waits[0]?.name}:${waits[0]?.args.timeoutMs}`, "jev_settle:250", "current extension: jev_settle for 250 ms");
   }
+});
+
+await check("a target that went stale is re-found by role and name, then acted on", async () => {
+  // jev_act refuses a ref that no longer names what Jev chose. The loop
+  // re-observes and retries once on the row that now carries that label.
+  const browser = fakeBrowser({
+    rows: [row({ ref: "ref_1", role: "button", name: "Apply" })],
+    onClick: (s) => { s.url = "https://app.test/applied"; }
+  });
+  browser.state.staleRefs = new Set(["ref_1"]);
+  const inner = browser.callTool;
+  let acts = 0;
+  const callTool = async (name, args) => {
+    // The first refusal re-renders the page with a fresh ref for the button.
+    if (name === "jev_act" && ++acts === 2) assert(args.ref === "ref_9", `retried on the new ref, got ${args.ref}`);
+    const r = await inner(name, args);
+    if (name === "jev_act" && acts === 1) browser.state.rows = [row({ ref: "ref_9", role: "button", name: "Apply" })];
+    return r;
+  };
+  const client = fakeClient([
+    { operation: choice("CLICK", 0.95), click_target: choice("e1", 0.95), sensitive: noul(0), satisfied: notYet },
+    { operation: choice("DONE", 0.95), sensitive: noul(0), satisfied: noul(0.95) }
+  ]);
+  const out = await navigate(callTool, client, CFG, { tabId: 1, goal: "apply", success_criteria: "applied" });
+  eq(out.status, "done", `reason: ${out.reason}`);
+  eq(acts, 2, "refused once, then done");
 });
 
 await check("jev_decide returns a short distribution in one id space", async () => {
@@ -730,7 +761,7 @@ await check("a carried action that fails the gate is re-asked, never executed", 
   });
   eq(client.seen.length, 3, "the second leg decided afresh");
   eq(out.status, "blocked", "and its own answer stands");
-  eq(browser.calls.filter((c) => c.name === "computer").length, 1, "only the first leg's click ran; the refused carried click never did");
+  eq(browser.calls.filter((c) => c.name === "jev_act").length, 1, "only the first leg's click ran; the refused carried click never did");
 });
 
 await check("a next leg already satisfied on arrival finishes without a request", async () => {

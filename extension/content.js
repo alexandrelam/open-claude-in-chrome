@@ -412,6 +412,22 @@
     });
   }
 
+  // Is `ref` still the element the decision was made about? Checked right
+  // before acting, because a Jev round trip sits between the observation and
+  // the action and the page can change under it. A ref that now names a
+  // different, hidden or disabled element is refused instead of clicked.
+  function jevGuard(ref, expect = {}) {
+    const el = resolveRef(ref);
+    if (!el || !el.isConnected) return { ok: false, reason: `${ref} is no longer on the page` };
+    if (el.disabled || el.closest('[aria-disabled="true"],[inert]')) return { ok: false, reason: `${ref} is now disabled` };
+    if (isHiddenFromA11y(el) || !isVisible(el)) return { ok: false, reason: `${ref} is no longer visible` };
+    const role = getRole(el) || "";
+    const name = getAccessibleName(el).substring(0, 100).replace(/\s+/g, " ").trim();
+    if (expect.role !== undefined && expect.role !== role) return { ok: false, reason: `${ref} is now a ${role || "element"}, not a ${expect.role}` };
+    if (expect.name !== undefined && expect.name !== name) return { ok: false, reason: `${ref} is now named "${name}", not "${expect.name}"` };
+    return { ok: true };
+  }
+
   // Everything the Jev loop needs from one observation, in one message:
   // structured rows (no text format to parse), what is on screen, and where
   // the page is scrolled. Replaces read_page + get_page_text + tabs_context.
@@ -778,6 +794,11 @@
       return true;
     }
 
+    if (msg.type === "jevGuard") {
+      sendResponse({ result: jevGuard(msg.ref, msg.expect || {}) });
+      return true;
+    }
+
     if (msg.type === "jevSettle") {
       settleFrames(msg.mode, msg.ref, msg.timeoutMs || 50).then((result) => sendResponse({ result }));
       return true;
@@ -858,6 +879,7 @@
     generateAccessibilityTree,
     jevSnapshot,
     settleFrames,
+    jevGuard,
     getPageText,
     findElements,
     setFormValue,

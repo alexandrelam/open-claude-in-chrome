@@ -290,7 +290,12 @@ claude mcp add open-claude-in-chrome -- node /absolute/path/to/host/mcp-server.j
 claude mcp add open-claude-in-chrome-codemode -- node /absolute/path/to/host/codemode/server-codemode.js
 ```
 
-Both of these carry the same sandbox as hybrid, so [Keeping `execute_code` running](#keeping-execute_code-running) applies to them too. Recording is only on the hybrid server.
+**Jev** — the 21 tools plus a decision layer that takes a whole subgoal in one call. See [Delegating steps to Jev](#delegating-steps-to-jev):
+```bash
+claude mcp add open-claude-in-chrome-jev --env OPENROUTER_API_KEY=sk-or-v1-... -- node /absolute/path/to/host/server-jev.js
+```
+
+The first three carry the same sandbox as hybrid, so [Keeping `execute_code` running](#keeping-execute_code-running) applies to them too. Recording is only on the hybrid server; the jev server has no sandbox and no `execute_code`.
 
 
 ## Imitation Learning (Recording)
@@ -408,6 +413,136 @@ If the model still uses direct tools on the second submission, that's a signal t
 #### Results
 
 #### Final Results Table
+
+## Delegating steps to Jev
+
+Most browser steps do not need a frontier model. "Click Search", "open the first
+row", "tick the box next to Last 30 days" are mechanical choices, and each one
+currently costs a full orchestrator turn: read the page, reason, act, repeat.
+This repo's own benchmark puts context at the centre of that cost — about +1.9s
+per turn per 100k tokens, over roughly 30 turns for a typical task.
+
+The `jev` server variant moves those choices to [Jev](https://openrouter.ai/docs/guides/community/jev),
+TypeSafe's decision model. Jev never generates text, selectors, coordinates or
+code: you give it state plus typed questions and it returns a choice with a
+calibrated probability. Input is billed at about $0.042 per million tokens and
+output is free.
+
+Every other Jev browser project starts its own Playwright Chromium or attaches
+over CDP, and since Chrome 136 CDP attach no longer works on the default
+profile — so none of them can drive the browser you are actually logged into.
+This one can, because the action still goes through the extension.
+
+### Two tools
+
+**`jev_navigate`** takes a subgoal and runs it to completion:
+
+```
+jev_navigate({
+  tabId: 12345,
+  goal: "open the most recent invoice",
+  success_criteria: "an invoice detail page with a total is shown",
+  values: { search_term: "ACME Corp" }      // optional; you supply all text
+})
+```
+
+It returns the steps taken, the final URL and title, an excerpt of the final
+page (so you do not need a `read_page` call to find out where it left the tab),
+and a status:
+
+| Status | Meaning |
+|---|---|
+| `done` | The success criteria were confirmed on a fresh look at the page |
+| `needs_help` | It stopped deliberately — low confidence, a sensitive action, or no progress. `reason` says which |
+| `needs_value` | A field needs text you did not provide. `reason` names the field and its role |
+| `blocked` | Nothing on the page can advance the goal, or the domain is not permitted |
+| `limit_reached` | Hit `max_steps`, `max_ms` or the spend cap |
+
+Anything other than `done` hands control back: read `reason`, take that one step
+yourself with the ordinary tools, and delegate again.
+
+**`jev_decide`** does the same observation and decision but performs no action,
+returning the proposal and the full probability distribution. Use it when trying
+the loop on a new site.
+
+### What it will not do
+
+The safety properties are structural, not advisory:
+
+- Jev picks from a list built from an observation taken moments earlier, and
+  answers with an index into it. Its output is never used as a selector, a URL
+  or code, and it can never name an element it was not offered.
+- `navigate`, `javascript_tool`, `file_upload` and `upload_image` are not in the
+  action table at all, so the loop cannot reach them. **Only you navigate** —
+  pass `start_url` if the run should begin somewhere else.
+- Actions that look destructive or irreversible (pay, delete, send, publish,
+  submit) stop with `needs_help` unless you pass `allow_sensitive: true`. Two
+  independent checks gate this: Jev's own judgement about consequences, and a
+  keyword match on the element's label. Either one is enough to stop.
+- Caps on steps (20, hard ceiling 50), wall-clock (60s) and spend. It gives up
+  after two steps that change nothing, and after the same action from the same
+  page state three times.
+
+### Privacy
+
+Each decision sends the page's URL, title, element labels and a short text
+excerpt to OpenRouter and TypeSafe. The server warns once per session on stderr.
+Restrict it per domain in `~/.config/open-claude-in-chrome/config.json`:
+
+```json
+{ "jev": { "allowed_domains": ["app.example.com"], "blocked_domains": ["bank.example.com"] } }
+```
+
+An allowlist is checked before any request is made, so a page on an off-list
+domain is never sent anywhere. Run traces are written to
+`~/.config/open-claude-in-chrome/jev-runs/<run_id>.json` and stay on your
+machine.
+
+### Configuration
+
+Environment first, then the `jev` object in the config file, then defaults:
+
+| Variable | Default | Notes |
+|---|---|---|
+| `OPENROUTER_API_KEY` | — | Required. Without it only the Jev tools fail; the 21 browser tools work as usual |
+| `JEV_MODEL` | `~typesafe/jev-latest` | Pin a versioned slug (`typesafe/jev-1.13`) in production; the resolved id is recorded in every trace |
+| `JEV_MAX_STEPS` | `20` | Hard ceiling 50, not raisable |
+| `JEV_MAX_MS` | `60000` | Wall-clock budget per call |
+| `JEV_MIN_CONFIDENCE` | `0.6` | Below this the loop hands back rather than guessing |
+| `JEV_BUDGET_USD` | `0.5` | Per call, enforced against the exact `usage.cost` the API returns |
+| `JEV_PROVIDER` | `openrouter` | `typesafe` calls TypeSafe directly with `TYPESAFE_API_KEY` |
+
+### In Cursor
+
+The jev server is a plain stdio MCP server, so it registers like any other. In
+`~/.cursor/mcp.json`:
+
+```json
+{
+  "mcpServers": {
+    "open-claude-in-chrome-jev": {
+      "command": "node",
+      "args": ["/absolute/path/to/host/server-jev.js"],
+      "env": { "OPENROUTER_API_KEY": "sk-or-v1-..." }
+    }
+  }
+}
+```
+
+No extension changes are needed — the loop drives the same 21 tools through the
+same native host, so humanize and audit modes apply to Jev's actions exactly as
+they do to your own.
+
+To see a single decision on a live tab without acting on it:
+
+```bash
+OPENROUTER_API_KEY=sk-or-v1-... node scratch/jev-spike.mjs <tabId> "open the latest invoice"
+```
+
+It prints the state size against Jev's 32k-token window, the latency split
+between the browser and the model, the exact cost, the full distribution, and
+what the gate would have done.
+
 
 ## Available Tools
 
@@ -578,6 +713,7 @@ No build step. All files are plain JavaScript. After pulling or editing code:
 | `extension/background.js`, `extension/content.js`, `extension/manifest.json`, or `extension/recorder/*` | Reload the extension: `brave://extensions` > click the reload icon |
 | `host/mcp-server.js` | Kill stale servers and reconnect: `pkill -f "node.*mcp-server"` then `/mcp` in Claude Code |
 | `host/codemode/*.js` or `host/codemode/worker/*` | Kill the codemode server: `pkill -f "server-codemode\|server-hybrid"` and `pkill -f wrangler`, then `/mcp` in Claude Code |
+| `host/server-jev.js` or `host/jev/*` | `./refresh-mcp.sh` (syntax-checks every jev file, then kills stale servers), then `/mcp` in Claude Code |
 | `host/native-host.js` | Restart the browser (close all windows, reopen) |
 | `install.sh` or native host name changed | Re-run `./install.sh <extension-id>`, restart browser, re-add MCP |
 

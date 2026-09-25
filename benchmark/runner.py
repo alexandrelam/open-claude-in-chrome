@@ -113,6 +113,28 @@ behavior/cursor/narration track and an images/ folder of frames). BEFORE you
 start clicking, read ./experience/README.md, study the demonstration whose goal
 is closest to your task, and follow the same UI flow. Adapt it to the current task."""
 
+# Phase 8: the Jev decision layer. Same jail and same rules as phase 1 — the
+# only differences are the server name and the instruction to delegate runs of
+# mechanical steps. Derived from OCIC_NOCODE_HEADER rather than copied, so a
+# later edit to the shared rules cannot drift between the two arms.
+_JEV_DELEGATION = """- A jev_navigate tool is available. Prefer it for any run of mechanical steps
+  (clicking through to a page, filtering a list, filling a form whose values you
+  already know): give it one subgoal, an observable success condition, and any
+  text to type, and it will take the steps for you. Read its result rather than
+  re-reading the page. If it returns needs_help, needs_value or blocked, take
+  that one step yourself with the ordinary tools and then delegate again.
+- Use jev_navigate for the mechanical parts and your own judgement for the rest.
+  Do not delegate a step that needs you to read or interpret page content."""
+
+def _jev_header():
+    base = OCIC_NOCODE_HEADER.replace(
+        '"open-claude-in-chrome-hybrid"', '"open-claude-in-chrome-jev"')
+    return base.replace(
+        "- Work autonomously to completion.",
+        _JEV_DELEGATION + "\n- Work autonomously to completion.")
+
+OCIC_JEV_HEADER = _jev_header()
+
 def _phase2_header(prior):
     base = OCIC_NOCODE_HEADER
     # inject the prior-experience block after the "logged in)." intro paragraph
@@ -422,6 +444,17 @@ EXPERIMENTS = {
     "gen-experiential": {
         "system": "ocic", "split": "train_order", "header": OCIC_NOCODE_HEADER,
         "claude_args": [], "execute_code_allowed": False,
+    },
+    # Phase 8: Jev decision layer (server-jev.js). Measured against
+    # exp1a-ocic-cold on the same test split — the PRD's targets are 40% fewer
+    # orchestrator turns and 25% less wall-clock at no accuracy cost, so the
+    # comparison only means anything if everything except the server is held
+    # fixed. mcp_server is read by audit_sandbox.py to strip the right tool
+    # prefix; arms without it default to the hybrid server.
+    "exp8-jev": {
+        "system": "ocic", "split": "test_order", "header": OCIC_JEV_HEADER,
+        "claude_args": [], "execute_code_allowed": False,
+        "mcp_server": "open-claude-in-chrome-jev",
     },
     # Phase 1
     "exp1a-ocic-cold": {

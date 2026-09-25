@@ -46,6 +46,15 @@ for f in common.js server-hybrid.js server-codemode.js; do
     && ok "syntax OK: codemode/$f" \
     || { bad "SYNTAX ERROR: codemode/$f — fix before refreshing"; PASS=0; }
 done
+# The jev variant lives at the host root and pulls in host/jev/*; a typo in any
+# of them only surfaces when the server is relaunched, which is exactly the
+# thing this script exists to make safe.
+for f in server-jev.js jev/config.js jev/client.js jev/observe.js jev/actions.js \
+         jev/shortlist.js jev/trace.js jev/navigator.js jev/tools.js; do
+  node --check "$HOST/$f" 2>/dev/null \
+    && ok "syntax OK: $f" \
+    || { bad "SYNTAX ERROR: $f — fix before refreshing"; PASS=0; }
+done
 [ "$PASS" = 1 ] || { echo; bad "on-disk code is not ready; not killing anything."; exit 1; }
 
 # ---- 2. what's running right now ----
@@ -54,8 +63,9 @@ bold "running MCP servers (this repo)"
 HY=$(pgrep -f "$SCOPE/codemode/server-hybrid.js" | wc -l | tr -d ' ')
 CM=$(pgrep -f "$SCOPE/codemode/server-codemode.js" | wc -l | tr -d ' ')
 DF=$(pgrep -f "$SCOPE/mcp-server.js" | wc -l | tr -d ' ')
-printf "  hybrid: %s   codemode: %s   default: %s\n" "$HY" "$CM" "$DF"
-TOTAL=$(( HY + CM + DF ))
+JV=$(pgrep -f "$SCOPE/server-jev.js" | wc -l | tr -d ' ')
+printf "  hybrid: %s   codemode: %s   default: %s   jev: %s\n" "$HY" "$CM" "$DF" "$JV"
+TOTAL=$(( HY + CM + DF + JV ))
 [ "$TOTAL" -gt 1 ] && printf "  \033[33m%s\033[0m\n" "note: $TOTAL servers alive — stale instances accumulate across sessions; this clears them."
 
 if [ "${1:-}" = "--check" ]; then
@@ -71,12 +81,13 @@ pkill -9 -f "$SCOPE/codemode/worker" 2>/dev/null && ok "killed wrangler/workerd 
 pkill -9 -f "$SCOPE/codemode/server-hybrid.js"   2>/dev/null && ok "killed server-hybrid.js"   || ok "no server-hybrid.js running"
 pkill -9 -f "$SCOPE/codemode/server-codemode.js" 2>/dev/null && ok "killed server-codemode.js" || ok "no server-codemode.js running"
 pkill -9 -f "$SCOPE/mcp-server.js"               2>/dev/null && ok "killed mcp-server.js"       || ok "no default mcp-server.js running"
+pkill -9 -f "$SCOPE/server-jev.js"              2>/dev/null && ok "killed server-jev.js"      || ok "no server-jev.js running"
 sleep 1
 
 # ---- 4. confirm clean ----
 echo
 bold "verify"
-LEFT=$(pgrep -f "$SCOPE/codemode/server-hybrid.js|$SCOPE/codemode/server-codemode.js|$SCOPE/mcp-server.js" | wc -l | tr -d ' ')
+LEFT=$(pgrep -f "$SCOPE/codemode/server-hybrid.js|$SCOPE/codemode/server-codemode.js|$SCOPE/mcp-server.js|$SCOPE/server-jev.js" | wc -l | tr -d ' ')
 if [ "$LEFT" = "0" ]; then
   ok "no MCP servers from this repo are running — next connect loads fresh code"
 else
